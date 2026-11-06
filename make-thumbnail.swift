@@ -10,7 +10,12 @@ else { fatalError("usage: make-thumbnail <Matrix.saver> <output dir>") }
 
 // Ignore any options saved by earlier test runs in this process's defaults domain.
 if let d = ScreenSaverDefaults(forModuleWithName: "local.agentsmith.MatrixSaver") {
-    for key in ["colorIndex", "speed", "density", "size"] { d.removeObject(forKey: key) }
+    for key in ["colorIndex", "customHue", "speed", "density", "size", "charset", "customChars", "depth", "glow",
+                "crt", "fps", "mainDisplayOnly", "introText", "messageText"] {
+        d.removeObject(forKey: key)
+    }
+    // Plain rain only: none of the timed or text effects.
+    for key in ["clock", "intro", "messages", "glitches"] { d.set(false, forKey: key) }
     d.synchronize()
 }
 

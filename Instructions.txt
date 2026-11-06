@@ -35,10 +35,33 @@ OPTIONS
 -------
 In System Settings, select Matrix and click Options to change:
 
-  Colour      Classic Green, Cyan, Blue, Purple, Red, Amber or White
+Rain
+
+  Preset      Classic, Sparse, Downpour or Slow Drift
+  Colour      Classic Green, Cyan, Blue, Purple, Red, Amber, White, a Custom
+              hue of your choice, or Colour Cycle, which slowly shifts hue
   Speed       How fast the streams fall
   Density     How many streams are on screen
   Font size   How large the characters are
+  Characters  Film, Binary, Latin, or Custom (type your own)
+
+Effects
+
+  Depth       Layers of rain: distant streams are small, dim and slow
+  Glow        How strongly the characters bloom
+  CRT         Faint scanlines and darkened edges, like an old monitor
+  Glitches    Now and then a patch flickers or the screen stutters
+  Frame rate  15, 30 or 60 frames per second. 15 uses the least power
+  Displays    Rain on every display, or on the main display only
+
+Text
+
+  Rain clock        Shows the current time in the rain
+  Film intro        Types your text on black before the rain begins
+  Hidden messages   Now and then lights up words in a column of rain
+
+For the intro and messages, separate each line or message with a /
+Type {name} anywhere to show your first name, e.g. Wake up, {name}…
 
 
 UNINSTALL
