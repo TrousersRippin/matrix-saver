@@ -19,6 +19,9 @@ private struct Settings: Equatable {
     static let cycleColorIndex = palette.count + 1
 
     static let speedRange = 0.25...3.0
+    /// Fall speed at 1.00×, relative to versions up to 3.4. Scales drops and fade together, so
+    /// trail length doesn't change.
+    static let baseSpeed: Float = 0.8
     static let densityRange = 0.2...3.0
     static let sizeRange = 0.5...3.0
     static let glowRange = 0.0...2.0
@@ -558,10 +561,10 @@ private final class Layer {
         self.speedScale = speedScale
     }
 
-    // Fade scales with speed so trail length stays the same at any speed. Log text fades more
-    // slowly so there is time to read it.
+    // Fade scales with speed so trail length stays the same at any speed. Log text falls at the
+    // same speed as the other sets but fades more slowly, so its trails are longer to read.
     func randomFade(speed: Float) -> Float {
-        Float.random(in: 0.35...0.85) * speed * speedScale * (feed == nil ? 1 : 0.45)
+        Float.random(in: 0.35...0.85) * speed * speedScale * (feed == nil ? 1 : 0.75)
     }
 
     func newDrop(speed: Float) -> Drop {
@@ -571,7 +574,6 @@ private final class Layer {
         if let feed {
             d.text = feed.nextLine()
             d.startRow = Int.random(in: 0...(rows / 3))
-            d.speed *= 0.6  // slow enough to read
         }
         return d
     }
@@ -737,7 +739,7 @@ final class MatrixView: ScreenSaverView {
         for (i, ch) in letters.enumerated() { letterIndex[ch] = UInt16(strings.count + i) }
         messageLetters = messages.map { $0.compactMap { letterIndex[$0] } }
 
-        let speed = Float(settings.speed)
+        let speed = Float(settings.speed) * Settings.baseSpeed
         layers = planes.enumerated().map { i, plane in
             let layer = Layer(alpha: plane.alpha, speedScale: plane.speed)
             layer.feed = logFeed
@@ -883,7 +885,7 @@ final class MatrixView: ScreenSaverView {
         if settings.clock { updateClock(front) }
         logFeed?.poll()
         if !stepGlitch(dt, front) {
-            let speed = Float(settings.speed)
+            let speed = Float(settings.speed) * Settings.baseSpeed
             for layer in layers { layer.step(dt, speed: speed) }
         }
         stepMessage(dt, front)

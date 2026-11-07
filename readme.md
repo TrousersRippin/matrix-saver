@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **3.3**.
+- Current version: **3.5**.
 
 ## Features
 
@@ -104,7 +104,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 3.4' -c 'Set :CFBundleVersion 9' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 3.6' -c 'Set :CFBundleVersion 11' Info.plist
 ```
 
 ### Render test
@@ -164,6 +164,8 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 3.5 | Logs fall at the same speed as Film; all rain 20% slower at every Speed setting |
+| 3.4 | Logs mode falls 20% faster |
 | 3.3 | Services picker for Loki |
 | 3.2 | Loki as a log source; log settings on their own Logs tab |
 | 3.1 | Keywords shown in red in log rain |

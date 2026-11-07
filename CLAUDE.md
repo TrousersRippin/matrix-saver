@@ -20,8 +20,13 @@ session update **Status and history** and anything else that changed.
 | `Tools/render-test.sh` | Renders the saver to a PNG without System Settings (see Testing) |
 | `Archive/1.0/` | Source of version 1.0 only |
 | `dist/` | Release DMGs |
+| `readme.md` | GitHub readme: features, install, Loki setup, building, version history. Update it with each release |
 
-Not a git repository.
+**Git:** repo on `main`, remote `git@github.com:TrousersRippin/matrix-saver.git` (first commit
+2026-11-06). `.gitignore` ignores `build/`, `dist/` and `.DS_Store` (they were tracked in the
+first commit and untracked afterwards). Troy's global `~/.config/git/ignore` ignores `.gitignore`
+itself, so it was force-added (`git add -f`); once tracked, edits to it show up normally. Commit or push only
+when Troy asks.
 
 ## Commands
 
@@ -44,7 +49,8 @@ Tools/render-test.sh   # render test, see below
 - **Character sets:** Film, Binary, Latin, Custom, Logs (`Settings.logCharset = 4`). Logs uses
   printable ASCII, glyph index = scalar - 0x20.
 - **Logs mode:** each drop spells one log line top to bottom from a random start row. Glyph
-  mutation is off, drops are slower and trails longer so it can be read.
+  mutation is off, drops fall at the same speed as Film but trails are longer (fade 0.75×,
+  i.e. 1.33× the length) so it can be read.
   - `LogSource`: `.file(path)` or `.loki(url:query:)`.
   - `LogFeed`: one **shared** instance per process (`LogFeed.shared`), because System Settings
     makes several preview views and the saver has one view per display. `poll()` is called from
@@ -112,8 +118,9 @@ protection). To change the installed saver's settings, ask Troy to use Options.
 
 1. `/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString X.Y' -c 'Set :CFBundleVersion N' Info.plist`
    (bump the build number by one every release).
-2. `./make-dmg.sh` (a Finder window opens and closes).
-3. Check: `hdiutil verify`, mount read-only, version in the mounted `Info.plist`, binary matches
+2. Update the version and history in `readme.md` (and `Instructions.txt` if options changed).
+3. `./make-dmg.sh` (a Finder window opens and closes).
+4. Check: `hdiutil verify`, mount read-only, version in the mounted `Info.plist`, binary matches
    `build/`, `codesign -v`. Then `./build.sh --install`.
 
 ## Troy's preferences
@@ -137,7 +144,14 @@ protection). To change the installed saver's settings, ask Troy to use Options.
 - **3.0** (2026-11-06): Logs character set, raining lines from a log file.
 - **3.1** (2026-11-06): keywords shown in red.
 - **3.2** (2026-11-06): Loki source; log settings moved to a new Logs tab.
-- **3.3** (2026-11-06): Services picker for Loki. Current release, installed on Troy's Mac.
+- **3.3** (2026-11-06): Services picker for Loki.
+- 2026-11-06: added `readme.md`; project put in git and pushed to GitHub. No code changes since 3.3.
+- **3.4** (2026-11-07): Logs mode 20% faster (drop speed 0.6 → 0.72, fade 0.45 → 0.54 so trail
+  length is unchanged).
+- **3.5** (2026-11-07): Logs drops fall at Film speed (0.72× multiplier removed; fade 0.54 → 0.75
+  so trail length is unchanged). All rain 20% slower at every Speed setting:
+  `Settings.baseSpeed = 0.8` multiplies `settings.speed` (drops and fade together, so trails keep
+  their length); the slider still reads 1.00×. Current release, installed on Troy's Mac.
 
 Ideas not done:
 - Loki basic auth / API token (would be stored in plain text in prefs).
