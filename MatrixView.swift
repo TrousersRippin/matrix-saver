@@ -1,6 +1,7 @@
 import AppKit
 import CoreText
 import ScreenSaver
+import os
 
 /// User options, persisted with ScreenSaverDefaults so the preview and the real saver share them.
 private struct Settings: Equatable {
@@ -23,8 +24,12 @@ private struct Settings: Equatable {
     static let glowRange = 0.0...2.0
     static let frameRates = [15, 30, 60]
 
-    static let charsets = ["Film", "Binary", "Latin", "Custom"]
+    static let charsets = ["Film", "Binary", "Latin", "Custom", "Logs"]
     static let customCharset = 3
+    static let logCharset = 4
+    static let defaultLogPath = "/var/log/install.log"
+    static let defaultKeywords = "error, fail, denied, fatal, crash, panic"
+    static let defaultLokiQuery = #"{service_name=~"traefik|postgres|loki"}"#
 
     static let presets: [(name: String, speed: Double, density: Double, size: Double, glow: Double)] = [
         ("Classic", 1.0, 1.0, 1.0, 1.0),
@@ -47,6 +52,11 @@ private struct Settings: Equatable {
     var size = 1.0      // multiplier on glyph size
     var charset = 0
     var customChars = ""
+    var logPath = Settings.defaultLogPath
+    var keywords = Settings.defaultKeywords
+    var logSource = 0   // 0: a file, 1: a Loki server
+    var lokiURL = ""
+    var lokiQuery = Settings.defaultLokiQuery
 
     var depth = true
     var glow = 1.0      // multiplier on glyph bloom
@@ -69,7 +79,8 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "depth": base.depth, "glow": base.glow,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
                               "mainDisplayOnly": base.mainDisplayOnly, "clock": base.clock, "intro": base.intro,
                               "introText": base.introText, "messages": base.messages,
@@ -82,6 +93,18 @@ private struct Settings: Equatable {
         s.size = d.double(forKey: "size").clamped(to: sizeRange)
         s.charset = d.integer(forKey: "charset").clamped(to: 0...(charsets.count - 1))
         s.customChars = d.string(forKey: "customChars") ?? ""
+        s.logPath = d.string(forKey: "logPath") ?? base.logPath
+        s.keywords = d.string(forKey: "keywords") ?? base.keywords
+        s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
+        s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
+        s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
+        // The Loki test build took a Loki address in the log file field.
+        let path = s.logPath.trimmingCharacters(in: .whitespaces).lowercased()
+        if path.hasPrefix("http://") || path.hasPrefix("https://") {
+            if s.lokiURL.isEmpty { s.lokiURL = s.logPath.trimmingCharacters(in: .whitespaces) }
+            s.logSource = 1
+            s.logPath = base.logPath
+        }
         s.depth = d.bool(forKey: "depth")
         s.glow = d.double(forKey: "glow").clamped(to: glowRange)
         s.crt = d.bool(forKey: "crt")
@@ -106,6 +129,11 @@ private struct Settings: Equatable {
         d.set(size, forKey: "size")
         d.set(charset, forKey: "charset")
         d.set(customChars, forKey: "customChars")
+        d.set(logPath, forKey: "logPath")
+        d.set(keywords, forKey: "keywords")
+        d.set(logSource, forKey: "logSource")
+        d.set(lokiURL, forKey: "lokiURL")
+        d.set(lokiQuery, forKey: "lokiQuery")
         d.set(depth, forKey: "depth")
         d.set(glow, forKey: "glow")
         d.set(crt, forKey: "crt")
@@ -135,11 +163,37 @@ private struct Settings: Equatable {
         NSColor(calibratedHue: CGFloat(hue), saturation: 0.75, brightness: 1, alpha: 1).usingColorSpace(.sRGB)!.cgColor
     }
 
+    /// The log file to rain, with ~ expanded. A blank path means the default.
+    var logFile: String {
+        let p = logPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ((p.isEmpty ? Self.defaultLogPath : p) as NSString).expandingTildeInPath
+    }
 
-    /// The rain's characters, and whether they are mirrored as in the film. Latin and custom
-    /// text stays readable. An empty custom set falls back to the film's characters.
+    /// Where log rain comes from. A blank query means the default.
+    var logSourceValue: LogSource {
+        guard logSource == 1 else { return .file(logFile) }
+        let q = lokiQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .loki(url: lokiURL.trimmingCharacters(in: .whitespacesAndNewlines), query: q.isEmpty ? Self.defaultLokiQuery : q)
+    }
+
+    /// The keywords to show in red in log text: comma separated, matched ignoring case.
+    var keywordList: [String] {
+        keywords.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .filter { !$0.isEmpty && $0.unicodeScalars.allSatisfy { (0x20...0x7E).contains($0.value) } }
+    }
+
+    /// The colour keywords are drawn in: red, or white when the rain is already reddish.
+    var keywordColor: CGColor {
+        let reddish = colorIndex == 4 || (colorIndex == Self.customColorIndex && (customHue < 0.06 || customHue > 0.94))
+        return reddish ? CGColor(gray: 1, alpha: 1) : CGColor(srgbRed: 1, green: 0.22, blue: 0.18, alpha: 1)
+    }
+
+    /// The rain's characters, and whether they are mirrored as in the film. Latin, custom and log
+    /// text stays readable. An empty custom set falls back to the film's characters. Logs use
+    /// printable ASCII in code order, so glyph index = scalar - 0x20 (see LogFeed).
     var glyphs: (strings: [String], mirrored: Bool) {
         switch charset {
+        case Self.logCharset: return ((0x20...0x7E).map { String(UnicodeScalar(UInt8($0))) }, false)
         case 1: return (["0", "1"], false)
         case 2: return ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".map(String.init), false)
         case Self.customCharset:
@@ -169,6 +223,302 @@ private extension Comparable {
     func clamped(to r: ClosedRange<Self>) -> Self { min(max(self, r.lowerBound), r.upperBound) }
 }
 
+/// Where log rain comes from: a file on this Mac, or a Loki server and a LogQL query.
+private enum LogSource: Equatable {
+    case file(String)
+    case loki(url: String, query: String)
+}
+
+/// Log lines for the rain to spell out, as glyph indices (scalar - 0x20, so 0 is a space), with
+/// `LogFeed.keywordBit` set on letters that are part of a keyword. New lines are shown first, then
+/// the history loops.
+///
+/// Files: reads the end of the file, then picks up appended lines. legacyScreenSaver's sandbox
+/// allows read-only access to the whole disk, so this is only limited by Unix permissions.
+/// Loki: fetches the last day of the query, then polls for newer lines. The sandbox allows
+/// outgoing connections, and plain http works to an IP address.
+private final class LogFeed {
+    static let tailBytes: UInt64 = 256 * 1024
+    static let maxHistory = 3000
+    static let maxLineLength = 200
+    static let keywordBit: UInt16 = 0x8000
+    static let lokiHistory: Double = 24 * 3600  // seconds fetched at start
+    // Loki logs every query it runs, with the query text. Every poll carries this tag and filters
+    // it out, so those lines about the saver's own polls don't show up in the rain. Loki also runs
+    // a stats lookup per query on the stream selector alone, which loses the tag; those lines are
+    // housekeeping noise, so they are left out too.
+    static let lokiFilters = #" != "matrix-saver-poll" != "query_type=stats""#
+
+    let source: LogSource
+    let keywordList: [String]
+    private let keywords: [[UInt16]]  // lowercased, as glyph indices
+    private var history: [[UInt16]] = []
+    private var fresh: [[UInt16]] = []   // arrived since the saver started
+    private var placeholder = false      // history is a status message, not log lines
+    private var cursor = 0
+    private var lastPoll: CFTimeInterval = 0
+
+    private var offset: UInt64 = 0       // file: position read up to (always just after a newline)
+    private var lokiSince: UInt64 = 0    // loki: newest timestamp received, in nanoseconds
+    private var lokiBusy = false         // loki: a request is in flight
+    private var lokiOK = false           // loki: has answered at least once
+
+    private static let log = Logger(subsystem: "local.agentsmith.MatrixSaver", category: "logs")
+
+    /// One feed shared by every saver view in the process: System Settings shows several previews
+    /// and the saver has a view per display, and the server should be polled once, not per view.
+    private static weak var current: LogFeed?
+
+    static func shared(_ source: LogSource, keywords: [String]) -> LogFeed {
+        if let f = current, f.source == source, f.keywordList == keywords { return f }
+        let f = LogFeed(source: source, keywords: keywords)
+        current = f
+        return f
+    }
+
+    private init(source: LogSource, keywords: [String]) {
+        self.source = source
+        keywordList = keywords
+        self.keywords = keywords.map { $0.unicodeScalars.map { UInt16($0.value - 0x20) } }
+        switch source {
+        case .file(let path): loadFile(path)
+        case .loki:
+            setStatus("CONNECTING TO LOKI")
+            fetchLoki()
+        }
+    }
+
+    /// The next line for a new drop: new lines first, then the history in order, looping.
+    func nextLine() -> [UInt16] {
+        if !fresh.isEmpty { return fresh.removeFirst() }
+        guard !history.isEmpty else { return [] }
+        if cursor >= history.count { cursor = 0 }
+        defer { cursor += 1 }
+        return history[cursor]
+    }
+
+    /// Checks for new lines every few seconds (every ten while Loki can't be reached).
+    func poll() {
+        let now = CACurrentMediaTime()
+        switch source {
+        case .file(let path):
+            guard now - lastPoll > 3 else { return }
+            lastPoll = now
+            pollFile(path)
+        case .loki:
+            guard !lokiBusy, now - lastPoll > (lokiOK ? 3 : 10) else { return }
+            lastPoll = now
+            fetchLoki()
+        }
+    }
+
+    private func setStatus(_ message: String) {
+        history = [encode(message)]
+        placeholder = true
+        cursor = 0
+    }
+
+    /// Adds newly arrived lines: shown next, and kept in the history.
+    private func append(_ lines: [[UInt16]]) {
+        guard !lines.isEmpty else { return }
+        if placeholder {
+            history = []
+            placeholder = false
+        }
+        fresh = Array((fresh + lines).suffix(200))
+        history = Array((history + lines).suffix(Self.maxHistory))
+    }
+
+    // MARK: File
+
+    /// A file that shrank was rotated: start over.
+    private func pollFile(_ path: String) {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 else { return }
+        if size < offset { loadFile(path); return }
+        guard size > offset else { return }
+        append(read(path, from: max(offset, size > Self.tailBytes ? size - Self.tailBytes : 0)))
+    }
+
+    private func loadFile(_ path: String) {
+        history = []
+        fresh = []
+        offset = 0
+        placeholder = false
+        lastPoll = CACurrentMediaTime()
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 else {
+            setStatus("CANNOT READ \(path)")
+            return
+        }
+        let start = size > Self.tailBytes ? size - Self.tailBytes : 0
+        history = Array(read(path, from: start, skipFirst: start > 0).suffix(Self.maxHistory))
+        if history.isEmpty { setStatus(offset == 0 ? "CANNOT READ \(path)" : "\(path) IS EMPTY") }
+        cursor = max(0, history.count - 400)  // start near the end, where the recent entries are
+    }
+
+    /// Reads from `start` to the end of the file, advancing `offset` past the last complete line.
+    private func read(_ path: String, from start: UInt64, skipFirst: Bool = false) -> [[UInt16]] {
+        guard let h = FileHandle(forReadingAtPath: path) else { return [] }
+        defer { try? h.close() }
+        guard (try? h.seek(toOffset: start)) != nil, let data = try? h.readToEnd(), !data.isEmpty else { return [] }
+        guard let lastNewline = data.lastIndex(of: 0x0A) else { return [] }
+        offset = start + UInt64(lastNewline - data.startIndex + 1)
+        var lines = data[data.startIndex...lastNewline].split(separator: 0x0A)
+        if skipFirst, !lines.isEmpty { lines.removeFirst() }  // probably started mid-line
+        return lines.map { self.encode(Self.stripTimestamp(String(decoding: $0, as: UTF8.self))) }.filter { !$0.isEmpty }
+    }
+
+    // MARK: Loki
+
+    private func fetchLoki() {
+        guard case let .loki(base, query) = source else { return }
+        var root = base
+        while root.hasSuffix("/") { root.removeLast() }
+        guard var c = URLComponents(string: root + "/loki/api/v1/query_range"), c.host != nil,
+              ["http", "https"].contains(c.scheme?.lowercased() ?? "") else {
+            setStatus("NOT A LOKI ADDRESS: \(base)")
+            return
+        }
+        let initial = !lokiOK
+        let now = UInt64(Date().timeIntervalSince1970 * 1e9)
+        c.queryItems = [
+            URLQueryItem(name: "query", value: query + Self.lokiFilters),
+            URLQueryItem(name: "start", value: String(initial ? now - UInt64(Self.lokiHistory * 1e9) : lokiSince + 1)),
+            URLQueryItem(name: "end", value: String(now)),
+            // At start, the most recent lines; after that, everything newer, oldest first.
+            URLQueryItem(name: "limit", value: initial ? "2000" : "500"),
+            URLQueryItem(name: "direction", value: initial ? "backward" : "forward"),
+        ]
+        // "+" is legal in a query component but servers read it as a space.
+        c.percentEncodedQuery = c.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let url = c.url else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        lokiBusy = true
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            var entries: [(ts: UInt64, line: String)] = []
+            var failure: String?
+            if let error {
+                failure = error.localizedDescription
+            } else if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                // Loki explains bad queries in the body.
+                failure = "HTTP \(http.statusCode) " + String(decoding: (data ?? Data()).prefix(160), as: UTF8.self)
+            } else if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let body = json["data"] as? [String: Any], let result = body["result"] as? [[String: Any]] {
+                for stream in result {
+                    let labels = stream["stream"] as? [String: String] ?? [:]
+                    let name = labels["container_name"] ?? labels["service_name"] ?? labels["job"] ?? ""
+                    for v in stream["values"] as? [[String]] ?? [] where v.count == 2 {
+                        guard let ts = UInt64(v[0]) else { continue }
+                        entries.append((ts, LogFeed.tidy(v[1], from: name)))
+                    }
+                }
+                entries.sort { $0.ts < $1.ts }
+            } else {
+                failure = "UNEXPECTED REPLY FROM LOKI"
+            }
+            DispatchQueue.main.async {
+                self?.receive(entries, failure: failure, initial: initial, asOf: now, base: base, query: query)
+            }
+        }.resume()
+    }
+
+    private func receive(_ entries: [(ts: UInt64, line: String)], failure: String?, initial: Bool,
+                         asOf now: UInt64, base: String, query: String) {
+        lokiBusy = false
+        if let failure {
+            Self.log.error("loki \(base, privacy: .public): \(failure, privacy: .public)")
+            if !lokiOK { setStatus("CANNOT REACH \(base): \(failure)") }
+            return  // keep showing what we have, and retry
+        }
+        lokiSince = max(lokiSince, entries.last?.ts ?? now)
+        let lines = entries.map { encode($0.line) }.filter { !$0.isEmpty }
+        if initial {
+            lokiOK = true
+            if lines.isEmpty {
+                setStatus("NO LOG LINES IN THE LAST DAY FOR \(query)")
+            } else {
+                history = Array(lines.suffix(Self.maxHistory))
+                placeholder = false
+                cursor = max(0, history.count - 400)
+            }
+        } else {
+            append(lines)
+        }
+    }
+
+    // MARK: Cleaning up lines
+
+    // Leading timestamps eat most of a column and repeat line after line, so drop them: ISO dates
+    // ("2026-11-06 10:22:01+01", "2026-11-06 11:24:51.319 CET") and syslog dates
+    // ("Fri Nov  6 10:28:56.515"). Drop the host name after one too ("macbook-pro Safari[53369]:"
+    // keeps "Safari[53369]:").
+    private static let timestamp = try! NSRegularExpression(pattern:
+        #"^(\d{4}-\d{2}-\d{2}[ T][\d:.]+(Z|[+-]\d{2}:?\d{0,2})?( [A-Z]{3,5})?|([A-Z][a-z]{2} )?[A-Z][a-z]{2} +\d{1,2} \d\d:\d\d:\d\d(\.\d+)?)\s+(\S+ (?=[^\s\[]+\[\d+\]:))?"#)
+    // logfmt fields that are noise in the rain: timestamps (Loki has its own), source locations, ids.
+    private static let logfmtNoise = try! NSRegularExpression(pattern:
+        #"(^|\s)(ts|time|caller|org_id|query_hash|traceID|spanID)=("[^"]*"|\S+)"#)
+    // A word repeated straight after itself, like "UCG-Fiber UCG-Fiber".
+    private static let repeatedWord = try! NSRegularExpression(pattern: #"(?<=^|\s)(\S{3,}) \1(?=\s|$)"#)
+
+    static func stripTimestamp(_ line: String) -> String {
+        replace(timestamp, in: line, with: "")
+    }
+
+    private static func replace(_ re: NSRegularExpression, in s: String, with template: String) -> String {
+        re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: template)
+    }
+
+    /// Makes a line from Loki readable in the rain: JSON becomes "level message key=value", logfmt
+    /// loses its noise fields, and the line is prefixed with the container it came from.
+    static func tidy(_ raw: String, from name: String) -> String {
+        var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if line.hasPrefix("{"), let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
+            let skip: Set = ["level", "lvl", "msg", "message", "time", "ts", "timestamp", "@timestamp"]
+            var parts: [String] = []
+            if let level = (obj["level"] ?? obj["lvl"]) as? String { parts.append(level) }
+            if let message = (obj["msg"] ?? obj["message"]) as? String { parts.append(message) }
+            for (k, v) in obj.sorted(by: { $0.key < $1.key }) where !skip.contains(k) { parts.append("\(k)=\(v)") }
+            line = parts.joined(separator: " ")
+        } else {
+            line = replace(logfmtNoise, in: line, with: "")
+        }
+        line = stripTimestamp(line.trimmingCharacters(in: .whitespaces))
+        line = replace(repeatedWord, in: line, with: "$1")
+        return name.isEmpty ? line : "\(name): \(line)"
+    }
+
+    private func encode(_ text: String) -> [UInt16] {
+        var out: [UInt16] = []
+        for u in text.unicodeScalars {
+            switch u.value {
+            case 0x20...0x7E: out.append(UInt16(u.value - 0x20))
+            case 0x09: out.append(0)
+            default: continue  // other characters have no glyph
+            }
+            if out.count >= Self.maxLineLength { break }
+        }
+        while out.last == 0 { out.removeLast() }
+        while out.first == 0 { out.removeFirst() }
+        markKeywords(&out)
+        return out
+    }
+
+    /// Sets the keyword bit on every letter of each keyword found, ignoring case.
+    private func markKeywords(_ out: inout [UInt16]) {
+        guard !keywords.isEmpty, !out.isEmpty else { return }
+        // Upper-case letters A-Z are glyphs 0x21...0x3A; lower-case is 0x20 further on.
+        let lower = out.map { (0x21...0x3A).contains($0) ? $0 + 0x20 : $0 }
+        for word in keywords where word.count <= lower.count {
+            for start in 0...(lower.count - word.count) where lower[start] == word[0] {
+                if lower[start..<(start + word.count)].elementsEqual(word) {
+                    for i in start..<(start + word.count) { out[i] |= Self.keywordBit }
+                }
+            }
+        }
+    }
+}
+
 /// One plane of rain: a grid of cells with a fading brightness trail per column, and pre-rendered
 /// white glyphs. Depth mode stacks three, drawn back to front.
 private final class Layer {
@@ -177,6 +527,9 @@ private final class Layer {
         var y: Float        // head position in rows (fractional)
         var speed: Float    // rows per second
         var lastRow: Int    // last row the head lit
+        var text: [UInt16] = []  // log mode: the line this drop spells out
+        var pos = 0              // log mode: next character of `text`
+        var startRow = 0         // log mode: row the text starts at, so columns don't line up
     }
 
     let alpha: CGFloat
@@ -189,28 +542,37 @@ private final class Layer {
 
     var chars: [UInt16] = []      // glyph index per cell (row-major)
     var bright: [Float] = []      // 0...1 per cell
+    var hot: [Bool] = []          // log mode: cell holds part of a keyword, drawn in red
     var fade: [Float] = []        // brightness lost per second, per column
     var drops: [Drop] = []
     var randomGlyphs: UInt16 = 1  // glyphs the rain may pick; message letters follow these
+    var feed: LogFeed?            // set in log mode: drops spell its lines instead of random glyphs
 
     var trailGlyphs: [CGImage] = []  // white, soft glow; tinted with the frame
     var headGlyphs: [CGImage] = []   // white, full glow; tinted with the frame
     var coreGlyphs: [CGImage] = []   // white, no glow; drawn after tinting so heads stay near-white
+    var hotGlyphs: [CGImage] = []    // log mode: keyword colour with glow; drawn after tinting
 
     init(alpha: CGFloat, speedScale: Float) {
         self.alpha = alpha
         self.speedScale = speedScale
     }
 
-    // Fade scales with speed so trail length stays the same at any speed.
+    // Fade scales with speed so trail length stays the same at any speed. Log text fades more
+    // slowly so there is time to read it.
     func randomFade(speed: Float) -> Float {
-        Float.random(in: 0.35...0.85) * speed * speedScale
+        Float.random(in: 0.35...0.85) * speed * speedScale * (feed == nil ? 1 : 0.45)
     }
 
     func newDrop(speed: Float) -> Drop {
         let y = -Float.random(in: 0...Float(rows) * 0.6)
-        let d = Drop(col: Int.random(in: 0..<cols), y: y,
+        var d = Drop(col: Int.random(in: 0..<cols), y: y,
                      speed: Float.random(in: 9...26) * speed * speedScale, lastRow: Int(floor(y)))
+        if let feed {
+            d.text = feed.nextLine()
+            d.startRow = Int.random(in: 0...(rows / 3))
+            d.speed *= 0.6  // slow enough to read
+        }
         return d
     }
 
@@ -230,7 +592,17 @@ private final class Layer {
                 let r = drops[i].lastRow
                 guard r >= 0 && r < rows else { continue }
                 let idx = r * cols + drops[i].col
-                chars[idx] = UInt16.random(in: 0..<randomGlyphs)
+                if feed != nil {
+                    if r < drops[i].startRow { continue }
+                    // A spent line ends the drop; its trail fades as usual.
+                    guard drops[i].pos < drops[i].text.count else { drops[i].lastRow = rows + 4; break }
+                    let v = drops[i].text[drops[i].pos]
+                    chars[idx] = v & ~LogFeed.keywordBit
+                    hot[idx] = v & LogFeed.keywordBit != 0
+                    drops[i].pos += 1
+                } else {
+                    chars[idx] = UInt16.random(in: 0..<randomGlyphs)
+                }
                 bright[idx] = 1
             }
             if drops[i].lastRow >= rows + 4 {
@@ -239,7 +611,8 @@ private final class Layer {
             }
         }
 
-        // Occasional glyph mutation within trails.
+        // Occasional glyph mutation within trails, but not in log text, which should stay readable.
+        guard feed == nil else { return }
         let mutations = max(1, Int(Float(cols * rows) * 0.25 * dt))
         for _ in 0..<mutations {
             chars[Int.random(in: 0..<chars.count)] = UInt16.random(in: 0..<randomGlyphs)
@@ -275,6 +648,7 @@ final class MatrixView: ScreenSaverView {
     private var lastTime: CFTimeInterval = 0
     private var cycleHue = 0.37
     private var crtImage: CGImage?
+    private var logFeed: LogFeed?
 
     private var introLines: [String] = []
     private var introActive = false
@@ -319,6 +693,7 @@ final class MatrixView: ScreenSaverView {
         if isAnimating { stopAnimation() }
         layers = []
         crtImage = nil
+        logFeed = nil
         clockMask = []
         clockBox = nil
         messageLetters = []
@@ -348,6 +723,11 @@ final class MatrixView: ScreenSaverView {
             : [(1, 1, 1, 1)]
 
         let (strings, mirrored) = settings.glyphs
+        if settings.charset == Settings.logCharset {
+            logFeed = LogFeed.shared(settings.logSourceValue, keywords: settings.keywordList)
+        } else {
+            logFeed = nil
+        }
 
         // Message letters are added to the front layer only, unmirrored so they can be read.
         let messages = settings.messages ? Settings.lines(settings.messageText).map { Array($0.uppercased().prefix(60)) } : []
@@ -360,6 +740,7 @@ final class MatrixView: ScreenSaverView {
         let speed = Float(settings.speed)
         layers = planes.enumerated().map { i, plane in
             let layer = Layer(alpha: plane.alpha, speedScale: plane.speed)
+            layer.feed = logFeed
             let font = max(3, (fontSize * plane.font).rounded())
             layer.cellW = (font * 0.72).rounded()
             layer.cellH = (font * 1.08).rounded()
@@ -370,6 +751,7 @@ final class MatrixView: ScreenSaverView {
 
             layer.chars = (0..<(layer.cols * layer.rows)).map { _ in UInt16.random(in: 0..<layer.randomGlyphs) }
             layer.bright = Array(repeating: 0, count: layer.cols * layer.rows)
+            layer.hot = Array(repeating: false, count: layer.cols * layer.rows)
             layer.fade = (0..<layer.cols).map { _ in layer.randomFade(speed: speed) }
             let dropCount = Double(layer.cols) * 0.9 * settings.density * Settings.densityScale * plane.share
             layer.drops = (0..<max(1, Int(dropCount))).map { _ in
@@ -386,6 +768,11 @@ final class MatrixView: ScreenSaverView {
                                              glow: CGColor(gray: 0.8, alpha: 0.7))
             layer.headGlyphs = renderGlyphs(entries, layer: layer, fontSize: font, scale: scale, glow: white)
             layer.coreGlyphs = renderGlyphs(entries, layer: layer, fontSize: font, scale: scale, glow: nil)
+            if logFeed != nil, !settings.keywordList.isEmpty {
+                let color = settings.keywordColor
+                layer.hotGlyphs = renderGlyphs(entries, layer: layer, fontSize: font, scale: scale,
+                                               glow: color.copy(alpha: 0.8), color: color)
+            }
             return layer
         }
 
@@ -494,6 +881,7 @@ final class MatrixView: ScreenSaverView {
         }
 
         if settings.clock { updateClock(front) }
+        logFeed?.poll()
         if !stepGlitch(dt, front) {
             let speed = Float(settings.speed)
             for layer in layers { layer.step(dt, speed: speed) }
@@ -603,6 +991,7 @@ final class MatrixView: ScreenSaverView {
             for i in 0..<m.shown {
                 let idx = (m.row + i) * front.cols + m.col
                 front.chars[idx] = m.letters[i]
+                front.hot[idx] = false
                 front.bright[idx] = 1
             }
             message = m
@@ -643,6 +1032,7 @@ final class MatrixView: ScreenSaverView {
                     let idx = r * front.cols + c
                     front.bright[idx] = Float.random(in: 0.2...1)
                     front.chars[idx] = UInt16.random(in: 0..<front.randomGlyphs)
+                    front.hot[idx] = false
                 }
             }
             return false
@@ -705,6 +1095,7 @@ final class MatrixView: ScreenSaverView {
         ctx.setBlendMode(.normal)
 
         if !introActive {
+            for layer in layers where !layer.hotGlyphs.isEmpty { drawKeywords(layer, ctx, isFront: layer === front) }
             for layer in layers { drawCores(layer, ctx, isFront: layer === front) }
             if let m = message { drawMessage(m, front, ctx) }
         }
@@ -739,7 +1130,7 @@ final class MatrixView: ScreenSaverView {
                 if let box, r >= box.r0, r <= box.r1, c >= box.c0, c <= box.c1 {
                     b = clockMask[base + c] ? max(b, 0.95) : b * 0.3
                 }
-                if b < 0.02 { continue }
+                if b < 0.02 || layer.hot[base + c] { continue }  // keywords are drawn after tinting
                 ctx.setAlpha(CGFloat(b * b) * layer.alpha)
                 ctx.draw(layer.trailGlyphs[Int(layer.chars[base + c])],
                          in: CGRect(x: CGFloat(c) * layer.cellW - layer.pad + dx, y: y, width: imgW, height: imgH))
@@ -749,6 +1140,31 @@ final class MatrixView: ScreenSaverView {
         ctx.setAlpha(layer.alpha)
         forEachVisibleHead(layer, box: box) { idx, x, y in
             ctx.draw(layer.headGlyphs[idx], in: CGRect(x: x, y: y, width: imgW, height: imgH))
+        }
+    }
+
+    /// Keyword cells in log mode, skipped by drawLayer and drawn here after tinting so they keep
+    /// their own colour. They fade like the rest of the trail.
+    private func drawKeywords(_ layer: Layer, _ ctx: CGContext, isFront: Bool) {
+        let imgW = layer.cellW + layer.pad * 2
+        let imgH = layer.cellH + layer.pad * 2
+        let box = settings.clock && isFront ? clockBox : nil
+        for r in 0..<layer.rows {
+            let y = bounds.height - CGFloat(r + 1) * layer.cellH - layer.pad
+            let dx = glitchBands.isEmpty ? 0 : glitchShift(atY: y)
+            let base = r * layer.cols
+            for c in 0..<layer.cols where layer.hot[base + c] {
+                var b = layer.bright[base + c]
+                if let box, r >= box.r0, r <= box.r1, c >= box.c0, c <= box.c1 {
+                    b = clockMask[base + c] ? max(b, 0.95) : b * 0.3
+                }
+                if b < 0.02 { continue }
+                // Brighter than the trail around it (which fades as b squared): red reads darker
+                // than green, and keywords should stand out.
+                ctx.setAlpha(CGFloat(min(1, b * 1.5)) * layer.alpha)
+                ctx.draw(layer.hotGlyphs[Int(layer.chars[base + c])],
+                         in: CGRect(x: CGFloat(c) * layer.cellW - layer.pad + dx, y: y, width: imgW, height: imgH))
+            }
         }
     }
 
@@ -818,6 +1234,16 @@ final class MatrixView: ScreenSaverView {
     #endif
 }
 
+extension OptionsController: NSTextFieldDelegate {
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if (obj.object as? NSTextField) === lokiURLField { controlsChanged() }
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        if (obj.object as? NSTextField) === lokiQueryField { rebuildServicesMenu() }
+    }
+}
+
 private extension Notification.Name {
     static let matrixOptionsChanged = Notification.Name("local.agentsmith.MatrixSaver.optionsChanged")
 }
@@ -864,6 +1290,16 @@ private final class OptionsController: NSObject {
     private var introField: NSTextField!
     private var messagesCheck: NSButton!
     private var messagesField: NSTextField!
+    private var logSourcePopup: NSPopUpButton!
+    private var logPathField: NSTextField!
+    private var lokiURLField: NSTextField!
+    private var lokiQueryField: NSTextField!
+    private var servicesButton: NSPopUpButton!
+    private var knownServices: [String] = []   // service_name values Loki has, once fetched
+    private var servicesStatus = ""            // shown in the menu while there is no list
+    private var fetchedURL = ""                // Loki address the list came (or is coming) from
+    private var keywordsField: NSTextField!
+    private var logsNote: NSTextField!
 
     private override init() {
         super.init()
@@ -944,7 +1380,7 @@ private final class OptionsController: NSObject {
             originY = 0
         }
 
-        let tabs = NSSegmentedControl(labels: ["Rain", "Effects", "Text"], trackingMode: .selectOne,
+        let tabs = NSSegmentedControl(labels: ["Rain", "Effects", "Text", "Logs"], trackingMode: .selectOne,
                                       target: self, action: #selector(pageChanged(_:)))
         tabs.selectedSegment = 0
         tabs.sizeToFit()
@@ -1004,6 +1440,35 @@ private final class OptionsController: NSObject {
         introField = textField(row: 2, x: margin, width: fieldW)
         messagesCheck = checkbox("Hidden messages in the rain", row: 3, x: margin)
         messagesField = textField(row: 4, x: margin, width: fieldW)
+
+        // Logs page.
+        newPage()
+        let wideW = controlW + valueW + gap
+        label("Source:", row: 0)
+        logSourcePopup = popup(["Log file", "Loki server"], row: 0)
+        label("Log file:", row: 1)
+        logPathField = textField(row: 1, x: controlX, width: wideW)
+        logPathField.placeholderString = Settings.defaultLogPath
+        label("Loki URL:", row: 2)
+        lokiURLField = textField(row: 2, x: controlX, width: wideW)
+        lokiURLField.placeholderString = "http://192.168.1.10:3100"
+        lokiURLField.delegate = self  // refetch the services when the address is edited
+        label("Services:", row: 3)
+        servicesButton = NSPopUpButton(frame: .zero, pullsDown: true)
+        servicesButton.addItem(withTitle: "")
+        place(servicesButton, row: 3, x: controlX - 3, width: wideW + 6)
+        label("Query:", row: 4)
+        lokiQueryField = textField(row: 4, x: controlX, width: wideW)
+        lokiQueryField.placeholderString = Settings.defaultLokiQuery
+        lokiQueryField.delegate = self  // keep the service ticks in step with typed queries
+        label("Keywords:", row: 5)
+        keywordsField = textField(row: 5, x: controlX, width: wideW)
+        keywordsField.placeholderString = "Shown in red; separate with commas"
+        logsNote = NSTextField(wrappingLabelWithString: "")
+        logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        logsNote.textColor = .secondaryLabelColor
+        logsNote.frame = NSRect(x: controlX, y: 6 * rowH + 6, width: wideW, height: rowH * 2)
+        parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
         parent = content
@@ -1079,6 +1544,12 @@ private final class OptionsController: NSObject {
         introField.stringValue = s.introText
         messagesCheck.state = s.messages ? .on : .off
         messagesField.stringValue = s.messageText
+        logSourcePopup.selectItem(at: s.logSource)
+        logPathField.stringValue = s.logPath
+        lokiURLField.stringValue = s.lokiURL
+        lokiQueryField.stringValue = s.lokiQuery
+        rebuildServicesMenu()
+        keywordsField.stringValue = s.keywords
         controlsChanged()
     }
 
@@ -1099,6 +1570,20 @@ private final class OptionsController: NSObject {
         customCharsField.isEnabled = charset == Settings.customCharset
         introField.isEnabled = introCheck.state == .on
         messagesField.isEnabled = messagesCheck.state == .on
+        let logs = charset == Settings.logCharset
+        let loki = logSourcePopup.indexOfSelectedItem == 1
+        logSourcePopup.isEnabled = logs
+        logPathField.isEnabled = logs && !loki
+        lokiURLField.isEnabled = logs && loki
+        lokiQueryField.isEnabled = logs && loki
+        servicesButton.isEnabled = logs && loki
+        if logs && loki { fetchServices() }
+        keywordsField.isEnabled = logs
+        logsNote.stringValue = logs
+            ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
+                    : "Shows the end of the file, then new lines as they are written.")
+            : "Choose Logs under Characters on the Rain tab to use these."
+
         // Show the preset these values match, or Custom when they match none.
         let close: (Double, Double) -> Bool = { abs($0 - $1) < 0.005 }
         let match = Settings.presets.firstIndex {
@@ -1106,6 +1591,102 @@ private final class OptionsController: NSObject {
                 && close($0.size, sizeSlider.doubleValue) && close($0.glow, glowSlider.doubleValue)
         }
         presetPopup.selectItem(at: match.map { $0 + 1 } ?? 0)
+    }
+
+    // MARK: Loki services
+
+    // A query that is just a list of services: {service_name="a"} or {service_name=~"a|b"}.
+    // container_name is read too, as earlier versions used it.
+    private static let servicesQuery = try! NSRegularExpression(
+        pattern: #"^\s*\{\s*(service_name|container_name)\s*=~?\s*"([^"|]+(\|[^"|]+)*)"\s*\}\s*$"#)
+
+    /// The services the query names, or nil when it is some other query.
+    private func selectedServices() -> [String]? {
+        var q = lokiQueryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { q = Settings.defaultLokiQuery }
+        guard let m = Self.servicesQuery.firstMatch(in: q, range: NSRange(q.startIndex..., in: q)),
+              let r = Range(m.range(at: 2), in: q) else { return nil }
+        return q[r].split(separator: "|").map(String.init)
+    }
+
+    private func servicesTitle(_ selected: [String]?) -> String {
+        guard let selected else { return "Custom query" }
+        return selected.joined(separator: ", ")
+    }
+
+    /// One checkbox per service. They sit in menu items as views, so ticking one leaves the menu
+    /// open for the next. Services in the query but not on the server are listed too.
+    private func rebuildServicesMenu() {
+        let selected = selectedServices()
+        let menu = NSMenu()
+        menu.addItem(withTitle: servicesTitle(selected), action: nil, keyEquivalent: "")  // a pull-down's title
+        let names = Set(knownServices + (selected ?? [])).sorted()
+        if knownServices.isEmpty, !servicesStatus.isEmpty {
+            let status = menu.addItem(withTitle: servicesStatus, action: nil, keyEquivalent: "")
+            status.isEnabled = false
+        }
+        for name in names {
+            let box = NSButton(checkboxWithTitle: name, target: self, action: #selector(serviceToggled(_:)))
+            box.state = selected?.contains(name) == true ? .on : .off
+            box.sizeToFit()
+            box.frame.origin = NSPoint(x: 14, y: 3)
+            let holder = NSView(frame: NSRect(x: 0, y: 0, width: max(240, box.frame.maxX + 14), height: box.frame.height + 6))
+            holder.addSubview(box)
+            let item = NSMenuItem()
+            item.view = holder
+            menu.addItem(item)
+        }
+        servicesButton.menu = menu
+    }
+
+    @objc private func serviceToggled(_ sender: NSButton) {
+        guard let menu = servicesButton.menu else { return }
+        let chosen = menu.items.compactMap { $0.view?.subviews.first as? NSButton }.filter { $0.state == .on }.map(\.title)
+        if chosen.isEmpty {  // the rain needs at least one
+            sender.state = .on
+            return
+        }
+        lokiQueryField.stringValue = chosen.count == 1
+            ? #"{service_name=""# + chosen[0] + #""}"#
+            : #"{service_name=~""# + chosen.joined(separator: "|") + #""}"#
+        menu.items.first?.title = servicesTitle(chosen)
+    }
+
+    /// Asks Loki for its service names, once per address. Covers the last week, so quiet services
+    /// (Loki's default is six hours) are still listed.
+    private func fetchServices() {
+        var root = lokiURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        while root.hasSuffix("/") { root.removeLast() }
+        guard root != fetchedURL else { return }
+        fetchedURL = root
+        knownServices = []
+        guard !root.isEmpty, var c = URLComponents(string: root + "/loki/api/v1/label/service_name/values"),
+              c.host != nil, ["http", "https"].contains(c.scheme?.lowercased() ?? "") else {
+            servicesStatus = "Enter the Loki URL to list services"
+            rebuildServicesMenu()
+            return
+        }
+        let now = Date().timeIntervalSince1970
+        c.queryItems = [URLQueryItem(name: "start", value: String(UInt64((now - 7 * 86400) * 1e9))),
+                        URLQueryItem(name: "end", value: String(UInt64(now * 1e9)))]
+        servicesStatus = "Loading services…"
+        rebuildServicesMenu()
+        guard let url = c.url else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            let names = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["data"] as? [String]
+            DispatchQueue.main.async {
+                guard let self, self.fetchedURL == root else { return }  // the address changed meanwhile
+                if let names {
+                    self.knownServices = names.sorted()
+                } else {
+                    self.servicesStatus = "Can't reach Loki at \(root)"
+                    self.fetchedURL = ""  // try again next time
+                }
+                self.rebuildServicesMenu()
+            }
+        }.resume()
     }
 
     @objc private func presetChosen() {
@@ -1132,6 +1713,10 @@ private final class OptionsController: NSObject {
         s.size = sizeSlider.doubleValue
         s.charset = charsetPopup.indexOfSelectedItem
         s.customChars = customCharsField.stringValue
+        s.logPath = logPathField.stringValue
+        s.logSource = logSourcePopup.indexOfSelectedItem
+        s.lokiURL = lokiURLField.stringValue
+        s.lokiQuery = lokiQueryField.stringValue
         s.depth = depthCheck.state == .on
         s.glow = glowSlider.doubleValue
         s.crt = crtCheck.state == .on
@@ -1143,6 +1728,7 @@ private final class OptionsController: NSObject {
         s.introText = introField.stringValue
         s.messages = messagesCheck.state == .on
         s.messageText = messagesField.stringValue
+        s.keywords = keywordsField.stringValue
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)
