@@ -59,6 +59,7 @@ private struct Settings: Equatable {
     var keywords = Settings.defaultKeywords
     var levelColors = true  // log mode: colour lines by log level
     var followVolume = true // log mode: more rain while logs are busy, less while quiet
+    var errorRipple = true  // log mode: a ripple spreads from each new error line
     var logSource = 0   // 0: a file, 1: a Loki server
     var lokiURL = ""
     var lokiQuery = Settings.defaultLokiQuery
@@ -84,7 +85,7 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "logSource": base.logSource, "lokiURL": base.lokiURL,
                               "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
                               "mainDisplayOnly": base.mainDisplayOnly, "clock": base.clock, "intro": base.intro,
@@ -102,6 +103,7 @@ private struct Settings: Equatable {
         s.keywords = d.string(forKey: "keywords") ?? base.keywords
         s.levelColors = d.bool(forKey: "levelColors")
         s.followVolume = d.bool(forKey: "followVolume")
+        s.errorRipple = d.bool(forKey: "errorRipple")
         s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
         s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
         s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
@@ -140,6 +142,7 @@ private struct Settings: Equatable {
         d.set(keywords, forKey: "keywords")
         d.set(levelColors, forKey: "levelColors")
         d.set(followVolume, forKey: "followVolume")
+        d.set(errorRipple, forKey: "errorRipple")
         d.set(logSource, forKey: "logSource")
         d.set(lokiURL, forKey: "lokiURL")
         d.set(lokiQuery, forKey: "lokiQuery")
@@ -274,7 +277,7 @@ private final class LogFeed {
 
     let source: LogSource
     let keywordList: [String]
-    let levels: Bool                  // detect log levels, for colour
+    let levels: Bool                  // colour by log level (levels are always marked, for ripples)
     private let keywords: [[UInt16]]  // lowercased, as glyph indices
     private var history: [[UInt16]] = []
     private var fresh: [[UInt16]] = []   // arrived since the saver started
@@ -321,13 +324,18 @@ private final class LogFeed {
         }
     }
 
-    /// The next line for a new drop: new lines first, then the history in order, looping.
-    func nextLine() -> [UInt16] {
-        if !fresh.isEmpty { return fresh.removeFirst() }
-        guard !history.isEmpty else { return [] }
+    /// The next line for a new drop: new lines first, then the history in order, looping. `isNew`
+    /// is true for a line that has just arrived.
+    func nextLine() -> (text: [UInt16], isNew: Bool) {
+        if !fresh.isEmpty { return (fresh.removeFirst(), true) }
+        guard !history.isEmpty else { return ([], false) }
         if cursor >= history.count { cursor = 0 }
         defer { cursor += 1 }
-        return history[cursor]
+        return (history[cursor], false)
+    }
+
+    static func level(of text: [UInt16]) -> Level {
+        Level(rawValue: ((text.first ?? 0) & levelBits) >> levelShift) ?? .normal
     }
 
     /// Checks for new lines every few seconds (every ten while Loki can't be reached).
@@ -655,15 +663,16 @@ private final class LogFeed {
         while out.last == 0 { out.removeLast() }
         while out.first == 0 { out.removeFirst() }
         markKeywords(&out)
-        if levels, level != .normal {
+        if level != .normal {
             for i in out.indices { out[i] |= level.rawValue << Self.levelShift }
         }
         return out
     }
 
-    /// How a cell holding glyph value `v` is drawn (see Layer.Ink).
-    static func ink(_ v: UInt16) -> UInt8 {
-        let level = Level(rawValue: (v & levelBits) >> levelShift) ?? .normal
+    /// How a cell holding glyph value `v` is drawn (see Layer.Ink), ignoring the level unless
+    /// `levels` (colour by level) is on.
+    static func ink(_ v: UInt16, levels: Bool) -> UInt8 {
+        let level = levels ? Level(rawValue: (v & levelBits) >> levelShift) ?? .normal : .normal
         if v & keywordBit != 0 { return level == .error ? Layer.Ink.keywordOnError : Layer.Ink.keyword }
         switch level {
         case .normal: return Layer.Ink.plain
@@ -712,6 +721,7 @@ private final class Layer {
         var pos = 0              // log mode: next character of `text`
         var startRow = 0         // log mode: row the text starts at, so columns don't line up
         var idle = false         // parked while the log is quiet (see Layer.active)
+        var ripple = false       // log mode: a new error line; ripples when it starts to show
     }
 
     let alpha: CGFloat
@@ -729,6 +739,7 @@ private final class Layer {
     var drops: [Drop] = []
     var active = Int.max          // drops in use; the rest finish their fall and park
     var baseDrops = 0             // drops at usual log volume (the Density setting)
+    var ripplesAt: [(col: Int, row: Int)] = []  // new error lines that started this step
     var randomGlyphs: UInt16 = 1  // glyphs the rain may pick; message letters follow these
     var feed: LogFeed?            // set in log mode: drops spell its lines instead of random glyphs
 
@@ -755,7 +766,9 @@ private final class Layer {
         var d = Drop(col: Int.random(in: 0..<cols), y: y,
                      speed: Float.random(in: 9...26) * speed * speedScale, lastRow: Int(floor(y)))
         if let feed {
-            d.text = feed.nextLine()
+            let line = feed.nextLine()
+            d.text = line.text
+            d.ripple = line.isNew && LogFeed.level(of: line.text) == .error
             d.startRow = Int.random(in: 0...(rows / 3))
         }
         return d
@@ -788,7 +801,11 @@ private final class Layer {
                     guard drops[i].pos < drops[i].text.count else { drops[i].lastRow = rows + 4; break }
                     let v = drops[i].text[drops[i].pos]
                     chars[idx] = v & LogFeed.glyphBits
-                    ink[idx] = LogFeed.ink(v)
+                    ink[idx] = LogFeed.ink(v, levels: feed?.levels ?? false)
+                    if drops[i].ripple {
+                        drops[i].ripple = false
+                        ripplesAt.append((drops[i].col, r))
+                    }
                     drops[i].pos += 1
                 } else {
                     chars[idx] = UInt16.random(in: 0..<randomGlyphs)
@@ -831,6 +848,14 @@ final class MatrixView: ScreenSaverView {
         var shown: Int { min(letters.count, Int(age * 12)) }
     }
 
+    /// A ring spreading from a new error line, lighting the rain it passes. In points, from the
+    /// top left.
+    private struct Ripple {
+        var x: CGFloat
+        var y: CGFloat
+        var age: Float = 0
+    }
+
     private struct GlitchBand {
         var y0: CGFloat
         var y1: CGFloat
@@ -859,6 +884,9 @@ final class MatrixView: ScreenSaverView {
     private var messageLetters: [[UInt16]] = []
     private var message: Message?
     private var nextMessage: Float = 0
+
+    private var ripples: [Ripple] = []
+    private var lastRipple: CFTimeInterval = 0
 
     private var nextGlitch: Float = 0
     private var glitchLeft: Float = 0
@@ -984,6 +1012,7 @@ final class MatrixView: ScreenSaverView {
 
         // These all hold positions in the old grid.
         message = nil
+        ripples = []
         glitchLeft = 0
         glitchBands = []
         clockMinute = -1
@@ -1122,7 +1151,55 @@ final class MatrixView: ScreenSaverView {
             let speed = Float(settings.speed) * Settings.baseSpeed
             for layer in layers { layer.step(dt, speed: speed) }
         }
+        stepRipples(dt)
         stepMessage(dt, front)
+    }
+
+    // MARK: - Error ripples
+
+    static let rippleLife: Float = 1.6        // seconds
+    static let rippleGap: CFTimeInterval = 3  // at least this long between ripples
+
+    private func stepRipples(_ dt: Float) {
+        let now = CACurrentMediaTime()
+        for layer in layers {
+            for p in layer.ripplesAt where settings.errorRipple && ripples.count < 3 && now - lastRipple >= Self.rippleGap {
+                ripples.append(Ripple(x: (CGFloat(p.col) + 0.5) * layer.cellW, y: (CGFloat(p.row) + 0.5) * layer.cellH))
+                lastRipple = now
+            }
+            layer.ripplesAt = []
+        }
+        guard !ripples.isEmpty else { return }
+        let reach = hypot(bounds.width, bounds.height) * 0.6
+        let ink = settings.levelColors ? Layer.Ink.error : Layer.Ink.plain
+        for i in ripples.indices { ripples[i].age += dt }
+        ripples.removeAll { $0.age >= Self.rippleLife }
+        for rp in ripples {
+            let t = CGFloat(rp.age / Self.rippleLife)
+            let radius = reach * (1 - (1 - t) * (1 - t))  // fast at first, slowing
+            let strength = Float(1 - t) * 0.9
+            for layer in layers {
+                let band = layer.cellH * 1.5
+                let r0 = max(0, Int((rp.y - radius - band) / layer.cellH)), r1 = min(layer.rows - 1, Int((rp.y + radius + band) / layer.cellH))
+                guard r0 <= r1 else { continue }
+                for r in r0...r1 {
+                    let dy = (CGFloat(r) + 0.5) * layer.cellH - rp.y
+                    let base = r * layer.cols
+                    for c in 0..<layer.cols {
+                        let dx = (CGFloat(c) + 0.5) * layer.cellW - rp.x
+                        let off = abs(hypot(dx, dy) - radius)
+                        guard off < band else { continue }
+                        let b = strength * Float(1 - off / band)
+                        let idx = base + c
+                        guard b > layer.bright[idx] else { continue }
+                        layer.bright[idx] = b
+                        if layer.ink[idx] != Layer.Ink.keyword && layer.ink[idx] != Layer.Ink.keywordOnError {
+                            layer.ink[idx] = ink
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Film intro
@@ -1549,6 +1626,7 @@ private final class OptionsController: NSObject {
     private var keywordsField: NSTextField!
     private var levelCheck: NSButton!
     private var volumeCheck: NSButton!
+    private var rippleCheck: NSButton!
     private var logsNote: NSTextField!
 
     private override init() {
@@ -1623,7 +1701,7 @@ private final class OptionsController: NSObject {
             return f
         }
         func newPage() {
-            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 9))
+            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 10))
             content.addSubview(page)
             pages.append(page)
             parent = page
@@ -1716,10 +1794,11 @@ private final class OptionsController: NSObject {
         keywordsField.placeholderString = "Shown in red; separate with commas"
         levelCheck = checkbox("Colour lines by log level", row: 6, x: controlX)
         volumeCheck = checkbox("More rain when logs are busy", row: 7, x: controlX)
+        rippleCheck = checkbox("Ripple when an error arrives", row: 8, x: controlX)
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 8 * rowH + 2, width: wideW, height: rowH * 1.5)
+        logsNote.frame = NSRect(x: controlX, y: 9 * rowH + 2, width: wideW, height: rowH * 1.5)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
@@ -1727,7 +1806,7 @@ private final class OptionsController: NSObject {
         originY = margin
 
         // Credit line. Bundle.main is the host process here, so look up the saver's own bundle.
-        let creditRow: CGFloat = 10.35
+        let creditRow: CGFloat = 11.35
         let version = Bundle(for: OptionsController.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let credit = NSTextField(labelWithString: "Version \(version) · Agent Smith")
         credit.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -1804,6 +1883,7 @@ private final class OptionsController: NSObject {
         keywordsField.stringValue = s.keywords
         levelCheck.state = s.levelColors ? .on : .off
         volumeCheck.state = s.followVolume ? .on : .off
+        rippleCheck.state = s.errorRipple ? .on : .off
         controlsChanged()
     }
 
@@ -1835,6 +1915,7 @@ private final class OptionsController: NSObject {
         keywordsField.isEnabled = logs
         levelCheck.isEnabled = logs
         volumeCheck.isEnabled = logs
+        rippleCheck.isEnabled = logs
         logsNote.stringValue = logs
             ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
                     : "Shows the end of the file, then new lines as they are written.")
@@ -1988,6 +2069,7 @@ private final class OptionsController: NSObject {
         s.keywords = keywordsField.stringValue
         s.levelColors = levelCheck.state == .on
         s.followVolume = volumeCheck.state == .on
+        s.errorRipple = rippleCheck.state == .on
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)

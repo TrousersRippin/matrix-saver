@@ -86,7 +86,7 @@ Tools/render-test.sh   # render test, see below
   exception that freezes the sheet. The controller is independent of any view because System
   Settings drops the view while the sheet is open.
   - Logs tab: Source (file / Loki), Log file, Loki URL, **Services** (pull-down of checkboxes;
-    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy". Pages are 9 rows. Services fetches
+    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives". Pages are 10 rows. Services fetches
     `/loki/api/v1/label/service_name/values` for the last 7 days and writes
     `{service_name=~"a|b"}` into Query. Any other query shows as "Custom query".
   - Migration in `Settings.load()`: an `http(s)://` in `logPath` (from a test build) moves to
@@ -136,6 +136,9 @@ protection). To change the installed saver's settings, ask Troy to use Options.
 3. `./make-dmg.sh` (a Finder window opens and closes).
 4. Check: `hdiutil verify`, mount read-only, version in the mounted `Info.plist`, binary matches
    `build/`, `codesign -v`. Then `./build.sh --install`.
+5. When Troy asks: commit, push, then `gh release create vX.Y dist/Matrix-X.Y.dmg --target main
+   --title "Matrix X.Y" --notes-file <notes>` (`--target` needs a branch or full SHA, not a short
+   one).
 
 ## Troy's preferences
 
@@ -177,6 +180,14 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   ISO times, taking them for a time zone.
 - **2.4** (2026-11-15, was 3.7): **rain density follows log volume** (Logs tab checkbox). Tested
   with a scratch harness (seed, 2.5× in a burst, back to ~1× 20 s after) and renders.
+- **2.5** (2026-11-15, was 3.8): **error ripple** (`Settings.errorRipple`, Logs tab "Ripple when
+  an error arrives", default on). A drop carrying a *newly arrived* error line
+  (`LogFeed.nextLine()` returns `isNew`) records its column/row in `Layer.ripplesAt` when its
+  first character shows; `MatrixView.stepRipples` turns that into a ring (1.6 s, ≤1 per 3 s)
+  that raises `bright` and sets error ink on cells it crosses (plain ink if level colours are
+  off). Levels are now always encoded in lines; `LogFeed.ink(_:levels:)` ignores them when
+  colour-by-level is off. Tested with a scratch harness (append an error line mid-run, capture
+  frames): red concentric rings, gone after ~2 s.
 
 Ideas not done:
 - Loki basic auth / API token (would be stored in plain text in prefs).

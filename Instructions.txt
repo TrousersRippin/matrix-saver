@@ -88,6 +88,10 @@ Logs (when Characters is set to Logs)
               than usual and thins (down to half) when the log is
               quiet. "Usual" is learnt from Loki's last day, or from a
               file's first minute, and keeps adjusting slowly
+  Ripple when an error arrives
+              A new error line sends a ring spreading across the rain
+              from where it starts (at most one every 3 seconds; not
+              for errors already in the log when the saver starts)
 
 Logs can show user names, computer names, addresses or network names, so
 mind who can see your screen.
