@@ -73,7 +73,8 @@ Logs (when Characters is set to Logs)
   Services    Tick the services to show, from the list Loki has
   Query       Filled in by Services, or type any LogQL query, e.g.
               {service_name="traefik"} |= "500". Shows the last day of
-              lines, then new ones as they arrive
+              lines, then new ones as they arrive. Services take turns,
+              so a busy one doesn't drown the quiet ones
   Keywords    Shown in red (white if the rain itself is red). Separate
               them with commas; case is ignored and "fail" also matches
               "Failed"

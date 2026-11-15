@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.6**.
+- Current version: **2.7**.
 
 ## Features
 
@@ -35,7 +35,9 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
   file and shows new lines as they're written.
 - **Loki:** point it at a [Grafana Loki](https://grafana.com/oss/loki/) server, tick the
   services you want from the list Loki has, or type any LogQL query. It shows the last day of
-  lines, then new ones as they arrive.
+  lines, then new ones as they arrive. Services share the rain fairly, so a chatty one doesn't
+  drown the quiet ones: a service that logs 26 lines an hour still gets seen next to one that
+  logs 3000.
 - **Keywords** such as `error, fail, denied, fatal` are shown in red (white on red rain).
 - **Log levels:** error lines are red, warnings amber and debug lines dimmed. The level comes from
   the line (`level=error`, `ERR`, `[warn]`, `WARNING:`, a CEF severity) or from Loki's labels.
@@ -109,7 +111,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.6' -c 'Set :CFBundleVersion 9' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.7' -c 'Set :CFBundleVersion 10' Info.plist
 ```
 
 ### Render test
@@ -168,6 +170,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.7 | Loki: services share the rain fairly, and quiet services' lines are fetched from further back |
 | 2.6 | Loki: the saver's start no longer rains Loki's own query-cancellation errors (or ripples for them) |
 | 2.5 | A new error line sends a ripple across the rain |
 | 2.4 | Rain density follows log volume: a downpour when logs are busy, sparse when quiet |

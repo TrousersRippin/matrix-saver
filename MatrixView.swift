@@ -252,7 +252,8 @@ private enum LogSource: Equatable {
 
 /// Log lines for the rain to spell out, as glyph indices (scalar - 0x20, so 0 is a space), with
 /// `LogFeed.keywordBit` set on letters that are part of a keyword and the line's log level in
-/// `levelBits`. New lines are shown first, then the history loops.
+/// `levelBits`. New lines are shown first, then the history loops. History is kept per service
+/// (a file is one), and drops take turns between services, so a busy one doesn't drown the rest.
 ///
 /// Files: reads the end of the file, then picks up appended lines. legacyScreenSaver's sandbox
 /// allows read-only access to the whole disk, so this is only limited by Unix permissions.
@@ -260,7 +261,10 @@ private enum LogSource: Equatable {
 /// outgoing connections, and plain http works to an IP address.
 private final class LogFeed {
     static let tailBytes: UInt64 = 256 * 1024
-    static let maxHistory = 3000
+    static let maxHistory = 3000            // file: lines kept
+    static let serviceHistory = 300         // loki: lines kept per service
+    static let lokiStartLimit = 2000        // loki: lines per start fetch
+    static let lokiStartRounds = 5          // loki: start fetches at most (see receive)
     static let maxLineLength = 200
     static let keywordBit: UInt16 = 0x8000
     static let levelShift: UInt16 = 13     // bits 13-14: the line's Level
@@ -283,10 +287,16 @@ private final class LogFeed {
     let keywordList: [String]
     let levels: Bool                  // colour by log level (levels are always marked, for ripples)
     private let keywords: [[UInt16]]  // lowercased, as glyph indices
-    private var history: [[UInt16]] = []
+    /// The lines kept from one service (Loki's service_name; a file is one source, named "").
+    private struct Source {
+        var lines: [[UInt16]] = []
+        var cursor = 0
+        var credit = 0.0                 // for taking turns, see nextLine
+    }
+    private var sources: [Source] = []
+    private var sourceIndex: [String: Int] = [:]
     private var fresh: [[UInt16]] = []   // arrived since the saver started
-    private var placeholder = false      // history is a status message, not log lines
-    private var cursor = 0
+    private var placeholder = false      // the history is a status message, not log lines
     private var lastPoll: CFTimeInterval = 0
 
     private var offset: UInt64 = 0       // file: position read up to (always just after a newline)
@@ -328,15 +338,63 @@ private final class LogFeed {
         }
     }
 
-    /// The next line for a new drop: new lines first, then the history in order, looping. `isNew`
-    /// is true for a line that has just arrived.
+    /// The next line for a new drop: new lines first, then the history, looping through each
+    /// source's lines in order. `isNew` is true for a line that has just arrived.
+    ///
+    /// Sources take turns (smooth weighted round-robin: each earns its weight in credit per line,
+    /// the one with most credit goes and pays the total). The weight is the square root of the
+    /// lines a source has, so a service with 300 lines comes up about 5× as often as one with 10,
+    /// not 30×: quiet services get seen, and their few lines don't repeat on every turn.
     func nextLine() -> (text: [UInt16], isNew: Bool) {
         if !fresh.isEmpty { return (fresh.removeFirst(), true) }
-        guard !history.isEmpty else { return ([], false) }
-        if cursor >= history.count { cursor = 0 }
-        defer { cursor += 1 }
-        return (history[cursor], false)
+        var total = 0.0
+        var best = -1
+        for i in sources.indices where !sources[i].lines.isEmpty {
+            let w = Double(sources[i].lines.count).squareRoot()
+            total += w
+            sources[i].credit += w
+            if best < 0 || sources[i].credit > sources[best].credit { best = i }
+        }
+        guard best >= 0 else { return ([], false) }
+        sources[best].credit -= total
+        if sources[best].cursor >= sources[best].lines.count { sources[best].cursor = 0 }
+        defer { sources[best].cursor += 1 }
+        return (sources[best].lines[sources[best].cursor], false)
     }
+
+    private var historyCap: Int {
+        if case .file = source { return Self.maxHistory }
+        return Self.serviceHistory
+    }
+
+    private func clearSources() {
+        sources = []
+        sourceIndex = [:]
+        placeholder = false
+    }
+
+    /// Adds lines to a source's history (or replaces it), keeping the newest `historyCap`.
+    private func store(_ lines: [[UInt16]], in key: String, replace: Bool = false) {
+        let i: Int
+        if let j = sourceIndex[key] {
+            i = j
+        } else {
+            i = sources.count
+            sources.append(Source())
+            sourceIndex[key] = i
+        }
+        if replace {
+            sources[i].lines = Array(lines.suffix(historyCap))
+            sources[i].cursor = max(0, sources[i].lines.count - 400)  // start near the newest
+        } else {
+            let all = sources[i].lines + lines
+            let dropped = max(0, all.count - historyCap)
+            sources[i].lines = Array(all.dropFirst(dropped))
+            sources[i].cursor = max(0, sources[i].cursor - dropped)  // stay on the same line
+        }
+    }
+
+    private var lineCount: Int { sources.reduce(0) { $0 + $1.lines.count } }
 
     static func level(of text: [UInt16]) -> Level {
         Level(rawValue: ((text.first ?? 0) & levelBits) >> levelShift) ?? .normal
@@ -359,22 +417,19 @@ private final class LogFeed {
     }
 
     private func setStatus(_ message: String) {
-        history = [encode(message, level: .normal)]
+        clearSources()
+        store([encode(message, level: .normal)], in: "")
         placeholder = true
-        cursor = 0
     }
 
-    /// Adds newly arrived lines: shown next, and kept in the history.
-    private func append(_ lines: [[UInt16]]) {
+    /// Adds newly arrived lines: shown next, and kept in their source's history.
+    private func append(_ lines: [(key: String, text: [UInt16])]) {
         guard !lines.isEmpty else { return }
-        if placeholder {
-            history = []
-            placeholder = false
-        }
-        fresh = Array((fresh + lines).suffix(200))
+        if placeholder { clearSources() }
+        fresh = Array((fresh + lines.map(\.text)).suffix(200))
         arrivals.append((CACurrentMediaTime(), lines.count))
         if baseline == nil { seedCount += lines.count }
-        history = Array((history + lines).suffix(Self.maxHistory))
+        for (key, group) in Dictionary(grouping: lines, by: \.key) { store(group.map(\.text), in: key) }
     }
 
     // MARK: Volume
@@ -416,26 +471,24 @@ private final class LogFeed {
         guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 else { return }
         if size < offset { loadFile(path); return }
         guard size > offset else { return }
-        append(read(path, from: max(offset, size > Self.tailBytes ? size - Self.tailBytes : 0)))
+        append(read(path, from: max(offset, size > Self.tailBytes ? size - Self.tailBytes : 0)).map { ("", $0) })
     }
 
     private func loadFile(_ path: String) {
-        history = []
+        clearSources()
         fresh = []
         offset = 0
-        placeholder = false
         lastPoll = CACurrentMediaTime()
         guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 else {
             setStatus("CANNOT READ \(path)")
             return
         }
         let start = size > Self.tailBytes ? size - Self.tailBytes : 0
-        history = Array(read(path, from: start, skipFirst: start > 0).suffix(Self.maxHistory))
-        if history.isEmpty {
+        store(read(path, from: start, skipFirst: start > 0), in: "", replace: true)
+        if lineCount == 0 {
             let readable = FileHandle(forReadingAtPath: path).map { try? $0.close(); return true } ?? false
             setStatus(readable ? "\(path) IS EMPTY" : "CANNOT READ \(path)")
         }
-        cursor = max(0, history.count - 400)  // start near the end, where the recent entries are
     }
 
     /// Reads from `start` to the end of the file, advancing `offset` past the last complete line.
@@ -455,7 +508,12 @@ private final class LogFeed {
 
     // MARK: Loki
 
-    private func fetchLoki() {
+    /// Loki entry: `key` is the source it is kept under (service_name, else the shown name), and
+    /// `service` the service_name label, if it has one (only those can be left out of a query).
+    private typealias LokiEntry = (ts: UInt64, line: String, level: Level, key: String, service: String?)
+
+    /// Fetches newer lines, or at start (`round` set, or no answer yet) the last day's.
+    private func fetchLoki(round: Int = 0, excluding: [String] = [], asOf: UInt64? = nil) {
         guard case let .loki(base, query) = source else { return }
         var root = base
         while root.hasSuffix("/") { root.removeLast() }
@@ -464,14 +522,14 @@ private final class LogFeed {
             setStatus("NOT A LOKI ADDRESS: \(base)")
             return
         }
-        let initial = !lokiOK
-        let now = UInt64(Date().timeIntervalSince1970 * 1e9)
+        let initial = !lokiOK || round > 0
+        let now = asOf ?? UInt64(Date().timeIntervalSince1970 * 1e9)
         c.queryItems = [
-            URLQueryItem(name: "query", value: query + Self.lokiFilters),
+            URLQueryItem(name: "query", value: Self.query(query, excluding: excluding) + Self.lokiFilters),
             URLQueryItem(name: "start", value: String(initial ? now - UInt64(Self.lokiHistory * 1e9) : lokiSince + 1)),
             URLQueryItem(name: "end", value: String(now)),
             // At start, the most recent lines; after that, everything newer, oldest first.
-            URLQueryItem(name: "limit", value: initial ? "2000" : "500"),
+            URLQueryItem(name: "limit", value: initial ? String(Self.lokiStartLimit) : "500"),
             URLQueryItem(name: "direction", value: initial ? "backward" : "forward"),
         ]
         // "+" is legal in a query component but servers read it as a space.
@@ -482,7 +540,7 @@ private final class LogFeed {
         lokiBusy = true
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            var entries: [(ts: UInt64, line: String, level: Level)] = []
+            var entries: [LokiEntry] = []
             var failure: String?
             if let error {
                 failure = error.localizedDescription
@@ -494,11 +552,13 @@ private final class LogFeed {
                 for stream in result {
                     let labels = stream["stream"] as? [String: String] ?? [:]
                     let name = labels["container_name"] ?? labels["service_name"] ?? labels["job"] ?? ""
+                    let service = labels["service_name"]
                     let labelLevel = LogFeed.level(labels: labels)
                     for v in stream["values"] as? [[String]] ?? [] where v.count >= 2 {
                         guard let ts = UInt64(v[0]) else { continue }
                         let line = LogFeed.tidy(v[1])
-                        entries.append((ts, name.isEmpty ? line : "\(name): \(line)", labelLevel ?? LogFeed.level(of: line)))
+                        entries.append((ts, name.isEmpty ? line : "\(name): \(line)", labelLevel ?? LogFeed.level(of: line),
+                                        service ?? name, service))
                     }
                 }
                 entries.sort { $0.ts < $1.ts }
@@ -506,22 +566,33 @@ private final class LogFeed {
                 failure = "UNEXPECTED REPLY FROM LOKI"
             }
             DispatchQueue.main.async {
-                self?.receive(entries, failure: failure, initial: initial, asOf: now, base: base, query: query)
+                self?.receive(entries, failure: failure, initial: initial, round: round, excluding: excluding,
+                              asOf: now, base: base, query: query)
             }
         }.resume()
     }
 
-    private func receive(_ entries: [(ts: UInt64, line: String, level: Level)], failure: String?, initial: Bool,
-                         asOf now: UInt64, base: String, query: String) {
+    /// At start, the newest lines of a day are mostly the busiest services' (at home, the 2000
+    /// newest span half an hour and Postgres has 10 of them). So the start fetch goes in rounds:
+    /// after each one, services that have `serviceHistory` lines (or else the one with most) are
+    /// left out of the query and it is run again, reaching further back for the rest. It stops
+    /// when a round comes back short of the limit (the day is covered) or after `lokiStartRounds`.
+    private func receive(_ entries: [LokiEntry], failure: String?, initial: Bool, round: Int,
+                         excluding: [String], asOf now: UInt64, base: String, query: String) {
         lokiBusy = false
         if let failure {
             Self.log.error("loki \(base, privacy: .public): \(failure, privacy: .public)")
             if !lokiOK { setStatus("CANNOT REACH \(base): \(failure)") }
             return  // keep showing what we have, and retry
         }
-        lokiSince = max(lokiSince, entries.last?.ts ?? now)
-        let lines = entries.map { encode($0.line, level: $0.level) }.filter { !$0.isEmpty }
-        if initial {
+        if round == 0 { lokiSince = max(lokiSince, entries.last?.ts ?? now) }
+        let lines = entries.compactMap { e -> (key: String, text: [UInt16])? in
+            let text = encode(e.line, level: e.level)
+            return text.isEmpty ? nil : (e.key, text)
+        }
+        guard initial else { append(lines); return }
+
+        if round == 0 {
             lokiOK = true
             // The usual rate: lines over the time they span (the fetch is capped, so may not be a day).
             if let first = entries.first?.ts, entries.count > 1, now > first {
@@ -531,14 +602,31 @@ private final class LogFeed {
             }
             if lines.isEmpty {
                 setStatus("NO LOG LINES IN THE LAST DAY FOR \(query)")
-            } else {
-                history = Array(lines.suffix(Self.maxHistory))
-                placeholder = false
-                cursor = max(0, history.count - 400)
+                return
             }
-        } else {
-            append(lines)
+            clearSources()
         }
+        // A later round reaches further back with the same end, so it has all the earlier lines of
+        // the services it includes.
+        for (key, group) in Dictionary(grouping: lines, by: \.key) { store(group.map(\.text), in: key, replace: true) }
+
+        guard entries.count >= Self.lokiStartLimit, round + 1 < Self.lokiStartRounds else { return }
+        var counts: [String: Int] = [:]
+        for e in entries { if let s = e.service { counts[s, default: 0] += 1 } }
+        var full = counts.filter { $0.value >= Self.serviceHistory }.map(\.key)
+        if full.isEmpty, let top = counts.max(by: { $0.value < $1.value }) { full = [top.key] }
+        guard !full.isEmpty else { return }
+        fetchLoki(round: round + 1, excluding: excluding + full.sorted(), asOf: now)
+    }
+
+    /// The query with `service_name!~"a|b"` added to its stream selector, leaving those out.
+    static func query(_ query: String, excluding services: [String]) -> String {
+        guard !services.isEmpty, let brace = query.firstIndex(of: "{") else { return query }
+        let pattern = services.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+        let literal = pattern.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        var q = query
+        q.insert(contentsOf: "service_name!~\"\(literal)\", ", at: q.index(after: brace))
+        return q
     }
 
     // MARK: Cleaning up lines

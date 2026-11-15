@@ -56,10 +56,18 @@ Tools/render-test.sh   # render test, see below
     the view's `step`, so nothing is polled while the saver isn't drawing.
   - Files: reads the last 256 KB, then appended lines every 3 s, restarting on rotation.
   - Loki: `query_range` over the last 24 h at start (backward, 2000), then forward from the
-    newest timestamp every 3 s (every 10 s while unreachable). Lines are prefixed with
+    newest timestamp every 3 s (every 10 s while unreachable). The start fetch goes in up to 5
+    rounds: services with ≥300 lines (else the top one) are excluded
+    (`service_name!~"..."` inserted into the selector, `LogFeed.query(_:excluding:)`) and it
+    reruns, so quiet services get lines from further back. Stops when a round returns <2000.
+    Lines are prefixed with
     `container_name` / `service_name` / `job`. `tidy()` turns JSON into "level message k=v" and
     drops logfmt noise (`ts`, `caller`, `org_id`, `query_hash`, ...). Leading timestamps and a
     repeated host name are stripped.
+  - **Fair share:** history is kept per source (`LogFeed.Source`, keyed by `service_name`, else
+    the shown name; a file is one source "") with 300 lines each (3000 for a file). `nextLine()`
+    takes new lines first, then picks a source by smooth weighted round-robin, weight
+    sqrt(line count). Measured with all ~27 services: unifi-siem went from 52% of drops to 6%.
   - **Self-echo filter:** Loki logs every query it runs, so each poll appends
     `!= "matrix-saver-poll" != "query_type=stats"` (`LogFeed.lokiFilters`). The tag removes lines
     about the saver's own queries; Loki's per-query stats lines drop the tag, hence the second
@@ -196,8 +204,14 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   got past the self-echo filter (seen in Loki: every scheduler_processor error burst over 6 h
   matched a saver start). Added the third filter in `LogFeed.lokiFilters`; checked live (7 new
   errors at start, 0 let through) and with a render.
+- **2.7** (2026-11-15, was 3.10): **fair share between services** (always on, no checkbox).
+  Before, the 2000-line start fetch covered only the last ~29 min and was half unifi-siem;
+  Postgres had 10 lines. Tested with a scratch harness (2000 `nextLine()` calls, all services:
+  27 sources, top ones ~6% each) and renders (file and Loki).
 
 Ideas not done:
+- **Error banner** (next, Troy chose it): show a newly arrived error line once across the screen
+  readably, like hidden messages, then let it melt into rain.
 - Loki basic auth / API token (would be stored in plain text in prefs).
 - Optional "colour the whole line" for keywords.
 - The default `install.log` produces lots of red from "Failed to..." lines; Troy may trim
