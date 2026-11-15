@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.5**.
+- Current version: **2.6**.
 
 ## Features
 
@@ -109,7 +109,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.5' -c 'Set :CFBundleVersion 8' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.6' -c 'Set :CFBundleVersion 9' Info.plist
 ```
 
 ### Render test
@@ -168,6 +168,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.6 | Loki: the saver's start no longer rains Loki's own query-cancellation errors (or ripples for them) |
 | 2.5 | A new error line sends a ripple across the rain |
 | 2.4 | Rain density follows log volume: a downpour when logs are busy, sparse when quiet |
 | 2.3 | Log lines coloured by level: errors red, warnings amber, debug dimmed |

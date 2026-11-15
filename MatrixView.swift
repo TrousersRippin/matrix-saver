@@ -272,8 +272,12 @@ private final class LogFeed {
     // Loki logs every query it runs, with the query text. Every poll carries this tag and filters
     // it out, so those lines about the saver's own polls don't show up in the rain. Loki also runs
     // a stats lookup per query on the stream selector alone, which loses the tag; those lines are
-    // housekeeping noise, so they are left out too.
+    // housekeeping noise, so they are left out too. And the first fetch (a day, newest first) is
+    // split into hourly subqueries that Loki cancels once it has enough lines; each cancel logs
+    // level=error lines ("context canceled", "err=EOF") without the tag, which would rain as red
+    // errors and set off a ripple every time the saver starts.
     static let lokiFilters = #" != "matrix-saver-poll" != "query_type=stats""#
+        + #" !~ "caller=(scheduler_processor|errors).go.*(context canceled|err=EOF)""#
 
     let source: LogSource
     let keywordList: [String]

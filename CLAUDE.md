@@ -64,6 +64,10 @@ Tools/render-test.sh   # render test, see below
     `!= "matrix-saver-poll" != "query_type=stats"` (`LogFeed.lokiFilters`). The tag removes lines
     about the saver's own queries; Loki's per-query stats lines drop the tag, hence the second
     filter.
+    A third filter, `!~ "caller=(scheduler_processor|errors).go.*(context canceled|err=EOF)"`,
+    drops the `level=error` lines Loki logs when it cancels the leftover hourly subqueries of the
+    saver's 24 h start fetch (about 8 per start; before this they rained red and fired a ripple
+    at every start). Over 7 days nothing outside Loki matched the pattern.
   - Keywords: matched case-insensitively when a line is encoded; matching letters carry
     `LogFeed.keywordBit` (0x8000) and become `Layer.Ink.keyword` cells, drawn red after tinting
     (white if the rain is red, including while Colour Cycle passes through red).
@@ -188,6 +192,10 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   off). Levels are now always encoded in lines; `LogFeed.ink(_:levels:)` ignores them when
   colour-by-level is off. Tested with a scratch harness (append an error line mid-run, capture
   frames): red concentric rings, gone after ~2 s.
+- **2.6** (2026-11-15, was 3.9): fix. Loki's own cancellation errors from the saver's start fetch
+  got past the self-echo filter (seen in Loki: every scheduler_processor error burst over 6 h
+  matched a saver start). Added the third filter in `LogFeed.lokiFilters`; checked live (7 new
+  errors at start, 0 let through) and with a render.
 
 Ideas not done:
 - Loki basic auth / API token (would be stored in plain text in prefs).
