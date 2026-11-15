@@ -83,6 +83,11 @@ Logs (when Characters is set to Logs)
               is that colour). Levels are read from the line, e.g.
               level=error, ERR, [warn] or WARNING:, or from Loki's
               level labels
+  More rain when logs are busy
+              The rain thickens (up to 2.5x) when lines arrive faster
+              than usual and thins (down to half) when the log is
+              quiet. "Usual" is learnt from Loki's last day, or from a
+              file's first minute, and keeps adjusting slowly
 
 Logs can show user names, computer names, addresses or network names, so
 mind who can see your screen.

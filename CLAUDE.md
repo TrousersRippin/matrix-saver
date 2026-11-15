@@ -75,12 +75,18 @@ Tools/render-test.sh   # render test, see below
     near that colour) and `renderInkGlyphs()` renders one glyph set per colour, re-rendered when
     Colour Cycle crosses an edge. Debug is drawn tinted at 0.4 alpha. ANSI colour codes are
     stripped from lines.
+  - **Volume** (`Settings.followVolume`, default on): `LogFeed.updateVolume` (from `poll()`, once a
+    second) compares new lines in the last 20 s (`append` records `arrivals`) with a usual rate,
+    seeded from Loki's initial fetch (count / span) or a file's first 60 s, then a 15-min moving
+    average that a burst can only pull towards 3× usual. `volume` = sqrt(ratio) clamped 0.5...2.5.
+    The view eases `volumeShown` towards it and sets each `Layer.active`; layers allocate 2.5× the
+    drops, and drops past `active` park (`Drop.idle`) when they finish falling.
 - **Options sheet** (`OptionsController`): tabs Rain, Effects, Text, Logs. Laid out with **fixed
   frames, not Auto Layout**: in legacyScreenSaver an unsatisfiable constraint is an uncaught
   exception that freezes the sheet. The controller is independent of any view because System
   Settings drops the view while the sheet is open.
   - Logs tab: Source (file / Loki), Log file, Loki URL, **Services** (pull-down of checkboxes;
-    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level". Services fetches
+    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy". Pages are 9 rows. Services fetches
     `/loki/api/v1/label/service_name/values` for the last 7 days and writes
     `{service_name=~"a|b"}` into Query. Any other query shows as "Custom query".
   - Migration in `Settings.load()`: an `http(s)://` in `logPath` (from a test build) moves to
@@ -169,6 +175,8 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
 - **2.3** (2026-11-15, was 3.6): **colour by log level** (Logs tab checkbox). Also fixed: ANSI
   colour codes rained as "[32m"; the timestamp stripper ate zerolog levels (`INF`, `ERR`) after
   ISO times, taking them for a time zone.
+- **2.4** (2026-11-15, was 3.7): **rain density follows log volume** (Logs tab checkbox). Tested
+  with a scratch harness (seed, 2.5× in a burst, back to ~1× 20 s after) and renders.
 
 Ideas not done:
 - Loki basic auth / API token (would be stored in plain text in prefs).

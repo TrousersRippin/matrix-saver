@@ -58,6 +58,7 @@ private struct Settings: Equatable {
     var logPath = Settings.defaultLogPath
     var keywords = Settings.defaultKeywords
     var levelColors = true  // log mode: colour lines by log level
+    var followVolume = true // log mode: more rain while logs are busy, less while quiet
     var logSource = 0   // 0: a file, 1: a Loki server
     var lokiURL = ""
     var lokiQuery = Settings.defaultLokiQuery
@@ -83,7 +84,7 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "logSource": base.logSource, "lokiURL": base.lokiURL,
                               "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
                               "mainDisplayOnly": base.mainDisplayOnly, "clock": base.clock, "intro": base.intro,
@@ -100,6 +101,7 @@ private struct Settings: Equatable {
         s.logPath = d.string(forKey: "logPath") ?? base.logPath
         s.keywords = d.string(forKey: "keywords") ?? base.keywords
         s.levelColors = d.bool(forKey: "levelColors")
+        s.followVolume = d.bool(forKey: "followVolume")
         s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
         s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
         s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
@@ -137,6 +139,7 @@ private struct Settings: Equatable {
         d.set(logPath, forKey: "logPath")
         d.set(keywords, forKey: "keywords")
         d.set(levelColors, forKey: "levelColors")
+        d.set(followVolume, forKey: "followVolume")
         d.set(logSource, forKey: "logSource")
         d.set(lokiURL, forKey: "lokiURL")
         d.set(lokiQuery, forKey: "lokiQuery")
@@ -284,6 +287,14 @@ private final class LogFeed {
     private var lokiBusy = false         // loki: a request is in flight
     private var lokiOK = false           // loki: has answered at least once
 
+    private let started = CACurrentMediaTime()
+    private var arrivals: [(t: CFTimeInterval, n: Int)] = []  // new lines in the last volumeWindow
+    private var seedCount = 0            // new lines before the usual rate is known (file)
+    private var baseline: Double?        // usual lines per second (slow average)
+    private var lastVolume: CFTimeInterval = 0
+    /// How busy the log is now compared with usual: 1 is usual, more when busier. See updateVolume.
+    private(set) var volume: Double = 1
+
     private static let log = Logger(subsystem: "local.agentsmith.MatrixSaver", category: "logs")
 
     /// One feed shared by every saver view in the process: System Settings shows several previews
@@ -322,6 +333,7 @@ private final class LogFeed {
     /// Checks for new lines every few seconds (every ten while Loki can't be reached).
     func poll() {
         let now = CACurrentMediaTime()
+        updateVolume(now)
         switch source {
         case .file(let path):
             guard now - lastPoll > 3 else { return }
@@ -348,7 +360,41 @@ private final class LogFeed {
             placeholder = false
         }
         fresh = Array((fresh + lines).suffix(200))
+        arrivals.append((CACurrentMediaTime(), lines.count))
+        if baseline == nil { seedCount += lines.count }
         history = Array((history + lines).suffix(Self.maxHistory))
+    }
+
+    // MARK: Volume
+
+    static let volumeWindow: Double = 20          // seconds of new lines that count as "now"
+    static let seedTime: Double = 60              // file: the first minute sets the usual rate
+    static let baselineTime: Double = 15 * 60     // how slowly "usual" follows the log
+    static let minRate: Double = 1.0 / 60         // a line a minute: quieter than this is quiet
+    static let volumeRange = 0.5...2.5
+
+    /// Compares the rate of new lines over the last minute with the usual rate, and sets `volume`
+    /// to the square root of that ratio (gentler than linear), clamped to `volumeRange`. The usual
+    /// rate comes from Loki's history at start, or, for a file, the first minute; after that it
+    /// follows the log over about a quarter of an hour. A burst moves it at most as if the rate
+    /// were 3× usual, so one busy spell doesn't make the quiet after it look unusually quiet.
+    private func updateVolume(_ now: CFTimeInterval) {
+        guard now - lastVolume >= 1 else { return }
+        let dt = lastVolume == 0 ? 0 : now - lastVolume
+        lastVolume = now
+        arrivals.removeAll { now - $0.t > Self.volumeWindow }
+        guard !placeholder else { volume = 1; return }
+        let recent = Double(arrivals.reduce(0) { $0 + $1.n }) / Self.volumeWindow
+        guard let base = baseline else {
+            if now - started >= Self.seedTime { baseline = Double(seedCount) / (now - started) }
+            volume = 1
+            return
+        }
+        let target = min(recent, max(base, Self.minRate) * 3)
+        let usual = base + (target - base) * min(1, dt / Self.baselineTime)
+        baseline = usual
+        let ratio = max(recent, Self.minRate * 0.1) / max(usual, Self.minRate)
+        volume = sqrt(ratio).clamped(to: Self.volumeRange)
     }
 
     // MARK: File
@@ -465,6 +511,12 @@ private final class LogFeed {
         let lines = entries.map { encode($0.line, level: $0.level) }.filter { !$0.isEmpty }
         if initial {
             lokiOK = true
+            // The usual rate: lines over the time they span (the fetch is capped, so may not be a day).
+            if let first = entries.first?.ts, entries.count > 1, now > first {
+                baseline = Double(entries.count) / max(Self.volumeWindow, Double(now - first) / 1e9)
+            } else {
+                baseline = 0
+            }
             if lines.isEmpty {
                 setStatus("NO LOG LINES IN THE LAST DAY FOR \(query)")
             } else {
@@ -659,6 +711,7 @@ private final class Layer {
         var text: [UInt16] = []  // log mode: the line this drop spells out
         var pos = 0              // log mode: next character of `text`
         var startRow = 0         // log mode: row the text starts at, so columns don't line up
+        var idle = false         // parked while the log is quiet (see Layer.active)
     }
 
     let alpha: CGFloat
@@ -674,6 +727,8 @@ private final class Layer {
     var ink: [UInt8] = []         // log mode: how each cell is drawn (Ink)
     var fade: [Float] = []        // brightness lost per second, per column
     var drops: [Drop] = []
+    var active = Int.max          // drops in use; the rest finish their fall and park
+    var baseDrops = 0             // drops at usual log volume (the Density setting)
     var randomGlyphs: UInt16 = 1  // glyphs the rain may pick; message letters follow these
     var feed: LogFeed?            // set in log mode: drops spell its lines instead of random glyphs
 
@@ -715,6 +770,11 @@ private final class Layer {
         }
 
         for i in drops.indices {
+            if drops[i].idle {
+                guard i < active else { continue }
+                drops[i] = newDrop(speed: speed)
+                fade[drops[i].col] = randomFade(speed: speed)
+            }
             drops[i].y += drops[i].speed * dt
             let row = Int(floor(drops[i].y))
             while drops[i].lastRow < row {
@@ -736,6 +796,11 @@ private final class Layer {
                 bright[idx] = 1
             }
             if drops[i].lastRow >= rows + 4 {
+                if i >= active {
+                    drops[i].idle = true
+                    drops[i].lastRow = -1  // no head
+                    continue
+                }
                 drops[i] = newDrop(speed: speed)
                 fade[drops[i].col] = randomFade(speed: speed)
             }
@@ -779,6 +844,7 @@ final class MatrixView: ScreenSaverView {
     private var cycleHue = 0.37
     private var crtImage: CGImage?
     private var logFeed: LogFeed?
+    private var volumeShown = 1.0       // log volume as the rain shows it (eased); see LogFeed.volume
     private var glyphScale: CGFloat = 2
     private var inkTint: [CGColor?]?   // colours inkGlyphs were rendered in, if any
 
@@ -887,10 +953,17 @@ final class MatrixView: ScreenSaverView {
             layer.ink = Array(repeating: Layer.Ink.plain, count: layer.cols * layer.rows)
             layer.fade = (0..<layer.cols).map { _ in layer.randomFade(speed: speed) }
             let dropCount = Double(layer.cols) * 0.9 * settings.density * Settings.densityScale * plane.share
-            layer.drops = (0..<max(1, Int(dropCount))).map { _ in
+            layer.baseDrops = max(1, Int(dropCount))
+            // Following log volume, spare drops wait parked for busy spells.
+            let following = logFeed != nil && settings.followVolume
+            let total = following ? Int(Double(layer.baseDrops) * LogFeed.volumeRange.upperBound) : layer.baseDrops
+            layer.active = following ? Int(Double(layer.baseDrops) * volumeShown) : layer.baseDrops
+            layer.drops = (0..<total).map { i in
                 var d = layer.newDrop(speed: speed)
                 d.y = -Float.random(in: 0...Float(layer.rows))
                 d.lastRow = Int(floor(d.y))
+                d.idle = i >= layer.active
+                if d.idle { d.lastRow = -1 }
                 return d
             }
 
@@ -1037,7 +1110,14 @@ final class MatrixView: ScreenSaverView {
         }
 
         if settings.clock { updateClock(front) }
-        logFeed?.poll()
+        if let logFeed {
+            logFeed.poll()
+            if settings.followVolume {
+                // Ease towards the feed's volume over a few seconds, so the rain swells and thins.
+                volumeShown += (logFeed.volume - volumeShown) * Double(min(1, dt * 0.4))
+                for layer in layers { layer.active = Int((Double(layer.baseDrops) * volumeShown).rounded()) }
+            }
+        }
         if !stepGlitch(dt, front) {
             let speed = Float(settings.speed) * Settings.baseSpeed
             for layer in layers { layer.step(dt, speed: speed) }
@@ -1358,7 +1438,7 @@ final class MatrixView: ScreenSaverView {
     private func forEachVisibleHead(_ layer: Layer, box: (c0: Int, c1: Int, r0: Int, r1: Int)?,
                                     _ body: (Int, CGFloat, CGFloat) -> Void) {
         // A log drop has no head until it reaches the row its line starts at.
-        for d in layer.drops where d.lastRow >= 0 && d.lastRow < layer.rows
+        for d in layer.drops where !d.idle && d.lastRow >= 0 && d.lastRow < layer.rows
             && (layer.feed == nil || d.lastRow >= d.startRow) {
             if let box, d.lastRow >= box.r0, d.lastRow <= box.r1, d.col >= box.c0, d.col <= box.c1 { continue }
             let y = bounds.height - CGFloat(d.lastRow + 1) * layer.cellH - layer.pad
@@ -1468,6 +1548,7 @@ private final class OptionsController: NSObject {
     private var fetchedURL = ""                // Loki address the list came (or is coming) from
     private var keywordsField: NSTextField!
     private var levelCheck: NSButton!
+    private var volumeCheck: NSButton!
     private var logsNote: NSTextField!
 
     private override init() {
@@ -1542,7 +1623,7 @@ private final class OptionsController: NSObject {
             return f
         }
         func newPage() {
-            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 8))
+            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 9))
             content.addSubview(page)
             pages.append(page)
             parent = page
@@ -1634,10 +1715,11 @@ private final class OptionsController: NSObject {
         keywordsField = textField(row: 5, x: controlX, width: wideW)
         keywordsField.placeholderString = "Shown in red; separate with commas"
         levelCheck = checkbox("Colour lines by log level", row: 6, x: controlX)
+        volumeCheck = checkbox("More rain when logs are busy", row: 7, x: controlX)
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 7 * rowH + 2, width: wideW, height: rowH * 1.5)
+        logsNote.frame = NSRect(x: controlX, y: 8 * rowH + 2, width: wideW, height: rowH * 1.5)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
@@ -1645,7 +1727,7 @@ private final class OptionsController: NSObject {
         originY = margin
 
         // Credit line. Bundle.main is the host process here, so look up the saver's own bundle.
-        let creditRow: CGFloat = 9.35
+        let creditRow: CGFloat = 10.35
         let version = Bundle(for: OptionsController.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let credit = NSTextField(labelWithString: "Version \(version) · Agent Smith")
         credit.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -1721,6 +1803,7 @@ private final class OptionsController: NSObject {
         rebuildServicesMenu()
         keywordsField.stringValue = s.keywords
         levelCheck.state = s.levelColors ? .on : .off
+        volumeCheck.state = s.followVolume ? .on : .off
         controlsChanged()
     }
 
@@ -1751,6 +1834,7 @@ private final class OptionsController: NSObject {
         if logs && loki { fetchServices() }
         keywordsField.isEnabled = logs
         levelCheck.isEnabled = logs
+        volumeCheck.isEnabled = logs
         logsNote.stringValue = logs
             ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
                     : "Shows the end of the file, then new lines as they are written.")
@@ -1903,6 +1987,7 @@ private final class OptionsController: NSObject {
         s.messageText = messagesField.stringValue
         s.keywords = keywordsField.stringValue
         s.levelColors = levelCheck.state == .on
+        s.followVolume = volumeCheck.state == .on
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)

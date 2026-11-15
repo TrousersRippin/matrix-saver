@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.3**.
+- Current version: **2.4**.
 
 ## Features
 
@@ -39,6 +39,8 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 - **Keywords** such as `error, fail, denied, fatal` are shown in red (white on red rain).
 - **Log levels:** error lines are red, warnings amber and debug lines dimmed. The level comes from
   the line (`level=error`, `ERR`, `[warn]`, `WARNING:`, a CEF severity) or from Loki's labels.
+- **Volume:** the rain thickens when lines arrive faster than usual (up to 2.5×) and thins when
+  the log goes quiet (down to half), so a burst of activity shows as a downpour.
 - Lines are tidied for the rain: terminal colour codes, timestamps and repeated host names are removed, JSON logs become
   `level message key=value`, and logfmt noise (`ts=`, `caller=`, …) is dropped.
 
@@ -106,7 +108,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.3' -c 'Set :CFBundleVersion 6' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.4' -c 'Set :CFBundleVersion 7' Info.plist
 ```
 
 ### Render test
@@ -165,6 +167,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.4 | Rain density follows log volume: a downpour when logs are busy, sparse when quiet |
 | 2.3 | Log lines coloured by level: errors red, warnings amber, debug dimmed |
 | 2.2 | Fixes: no stray character above a log line as it starts; an empty log file or Loki service list says so; keywords follow Colour Cycle |
 | 2.1 | Logs fall at the same speed as Film; all rain 20% slower at every Speed setting |
