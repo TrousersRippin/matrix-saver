@@ -60,6 +60,7 @@ private struct Settings: Equatable {
     var levelColors = true  // log mode: colour lines by log level
     var followVolume = true // log mode: more rain while logs are busy, less while quiet
     var errorRipple = true  // log mode: a ripple spreads from each new error line
+    var errorBanner = true  // log mode: each new error line is written across the screen
     var logSource = 0   // 0: a file, 1: a Loki server
     var lokiURL = ""
     var lokiQuery = Settings.defaultLokiQuery
@@ -85,7 +86,7 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "errorBanner": base.errorBanner, "logSource": base.logSource, "lokiURL": base.lokiURL,
                               "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
                               "mainDisplayOnly": base.mainDisplayOnly, "clock": base.clock, "intro": base.intro,
@@ -104,6 +105,7 @@ private struct Settings: Equatable {
         s.levelColors = d.bool(forKey: "levelColors")
         s.followVolume = d.bool(forKey: "followVolume")
         s.errorRipple = d.bool(forKey: "errorRipple")
+        s.errorBanner = d.bool(forKey: "errorBanner")
         s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
         s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
         s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
@@ -143,6 +145,7 @@ private struct Settings: Equatable {
         d.set(levelColors, forKey: "levelColors")
         d.set(followVolume, forKey: "followVolume")
         d.set(errorRipple, forKey: "errorRipple")
+        d.set(errorBanner, forKey: "errorBanner")
         d.set(logSource, forKey: "logSource")
         d.set(lokiURL, forKey: "lokiURL")
         d.set(lokiQuery, forKey: "lokiQuery")
@@ -813,7 +816,7 @@ private final class Layer {
         var pos = 0              // log mode: next character of `text`
         var startRow = 0         // log mode: row the text starts at, so columns don't line up
         var idle = false         // parked while the log is quiet (see Layer.active)
-        var ripple = false       // log mode: a new error line; ripples when it starts to show
+        var ripple = false       // log mode: a new error line; ripples (and banners) when it starts to show
     }
 
     let alpha: CGFloat
@@ -831,7 +834,7 @@ private final class Layer {
     var drops: [Drop] = []
     var active = Int.max          // drops in use; the rest finish their fall and park
     var baseDrops = 0             // drops at usual log volume (the Density setting)
-    var ripplesAt: [(col: Int, row: Int)] = []  // new error lines that started this step
+    var newErrors: [(col: Int, row: Int, text: [UInt16])] = []  // new error lines that started this step
     var randomGlyphs: UInt16 = 1  // glyphs the rain may pick; message letters follow these
     var feed: LogFeed?            // set in log mode: drops spell its lines instead of random glyphs
 
@@ -896,7 +899,7 @@ private final class Layer {
                     ink[idx] = LogFeed.ink(v, levels: feed?.levels ?? false)
                     if drops[i].ripple {
                         drops[i].ripple = false
-                        ripplesAt.append((drops[i].col, r))
+                        newErrors.append((drops[i].col, r, drops[i].text))
                     }
                     drops[i].pos += 1
                 } else {
@@ -948,6 +951,22 @@ final class MatrixView: ScreenSaverView {
         var age: Float = 0
     }
 
+    /// A newly arrived error line written across the front layer, left to right, held a few
+    /// seconds, then let go letter by letter to fade like any other trail.
+    private struct Banner {
+        var cells: [(r: Int, c: Int, v: UInt16)]  // letters in reading order: glyph and flags
+        var box: (c0: Int, c1: Int, r0: Int, r1: Int)
+        var release: [Float]                      // per letter: when it is let go, into the melt
+        var age: Float = 0
+        static let typeRate: Float = 80           // letters a second
+        static let hold: Float = 4                // seconds, once fully written
+        static let melt: Float = 1.5              // seconds over which letters are let go
+        var typed: Float { Float(cells.count) / Self.typeRate }
+        var shown: Int { min(cells.count, Int(age * Self.typeRate)) }
+        var melting: Float { max(0, age - typed - Self.hold) }  // seconds into the melt
+        var done: Bool { melting >= Self.melt }
+    }
+
     private struct GlitchBand {
         var y0: CGFloat
         var y1: CGFloat
@@ -979,6 +998,10 @@ final class MatrixView: ScreenSaverView {
 
     private var ripples: [Ripple] = []
     private var lastRipple: CFTimeInterval = 0
+
+    private var banner: Banner?
+    private var lastBanner: CFTimeInterval = 0
+    private var bannerBox: (c0: Int, c1: Int, r0: Int, r1: Int)?  // cleared behind the banner, until it melts
 
     private var nextGlitch: Float = 0
     private var glitchLeft: Float = 0
@@ -1016,6 +1039,8 @@ final class MatrixView: ScreenSaverView {
         clockBox = nil
         messageLetters = []
         message = nil
+        banner = nil
+        bannerBox = nil
         glitchBands = []
         laidOutSize = .zero  // lay out afresh if this instance is ever drawn again
     }
@@ -1100,11 +1125,13 @@ final class MatrixView: ScreenSaverView {
         }
         glyphScale = scale
         inkTint = nil
-        if logFeed != nil, !settings.keywordList.isEmpty || settings.levelColors { renderInkGlyphs() }
+        if logFeed != nil, !settings.keywordList.isEmpty || settings.levelColors || settings.errorBanner { renderInkGlyphs() }
 
         // These all hold positions in the old grid.
         message = nil
         ripples = []
+        banner = nil
+        bannerBox = nil
         glitchLeft = 0
         glitchBands = []
         clockMinute = -1
@@ -1243,6 +1270,7 @@ final class MatrixView: ScreenSaverView {
             let speed = Float(settings.speed) * Settings.baseSpeed
             for layer in layers { layer.step(dt, speed: speed) }
         }
+        stepBanner(dt, front)  // before stepRipples, which clears newErrors
         stepRipples(dt)
         stepMessage(dt, front)
     }
@@ -1255,11 +1283,11 @@ final class MatrixView: ScreenSaverView {
     private func stepRipples(_ dt: Float) {
         let now = CACurrentMediaTime()
         for layer in layers {
-            for p in layer.ripplesAt where settings.errorRipple && ripples.count < 3 && now - lastRipple >= Self.rippleGap {
+            for p in layer.newErrors where settings.errorRipple && ripples.count < 3 && now - lastRipple >= Self.rippleGap {
                 ripples.append(Ripple(x: (CGFloat(p.col) + 0.5) * layer.cellW, y: (CGFloat(p.row) + 0.5) * layer.cellH))
                 lastRipple = now
             }
-            layer.ripplesAt = []
+            layer.newErrors = []
         }
         guard !ripples.isEmpty else { return }
         let reach = hypot(bounds.width, bounds.height) * 0.6
@@ -1292,6 +1320,74 @@ final class MatrixView: ScreenSaverView {
                 }
             }
         }
+    }
+
+    // MARK: - Error banner
+
+    static let bannerGap: CFTimeInterval = 10  // at least this long between banners
+    static let bannerWidth = 72                // columns at most
+    static let bannerLines = 3                 // rows at most; the rest is cut
+
+    private func stepBanner(_ dt: Float, _ front: Layer) {
+        if settings.errorBanner, banner == nil, CACurrentMediaTime() - lastBanner >= Self.bannerGap,
+           let text = layers.lazy.flatMap({ $0.newErrors }).first?.text {
+            startBanner(text, front)
+        }
+        guard var b = banner else { return }
+        b.age += dt
+        if b.done || !settings.errorBanner {
+            banner = nil
+            bannerBox = nil
+            return
+        }
+        let melting = b.melting
+        bannerBox = melting > 0 ? nil : b.box
+        if let box = bannerBox {
+            // Clear the strip so the letters read; the rain carries on around it.
+            for r in box.r0...box.r1 {
+                for c in box.c0...box.c1 { front.bright[r * front.cols + c] = 0 }
+            }
+        }
+        for i in 0..<b.shown where melting <= b.release[i] {
+            let cell = b.cells[i]
+            let idx = cell.r * front.cols + cell.c
+            front.chars[idx] = cell.v & LogFeed.glyphBits
+            front.ink[idx] = LogFeed.ink(cell.v, levels: true)
+            front.bright[idx] = 1
+        }
+        banner = b
+    }
+
+    /// Lays the line out in the middle of the screen, wrapped at spaces, and starts writing it.
+    private func startBanner(_ text: [UInt16], _ front: Layer) {
+        let width = min(Self.bannerWidth, front.cols - 4)
+        guard width >= 12, front.rows >= Self.bannerLines + 4, !text.isEmpty else { return }
+        var lines: [ArraySlice<UInt16>] = []
+        var i = 0
+        while i < text.count, lines.count < Self.bannerLines {
+            var end = min(i + width, text.count)
+            if end < text.count,
+               let space = text[(i + width / 2)..<end].lastIndex(where: { $0 & LogFeed.glyphBits == 0 }) {
+                end = space + 1
+            }
+            lines.append(text[i..<end])
+            i = end
+            while i < text.count, text[i] & LogFeed.glyphBits == 0 { i += 1 }  // no leading spaces
+        }
+        let longest = lines.map(\.count).max() ?? 0
+        let c0 = (front.cols - longest) / 2
+        let r0 = Int.random(in: (front.rows / 5)...max(front.rows / 5, front.rows * 2 / 3 - lines.count))
+        var cells: [(r: Int, c: Int, v: UInt16)] = []
+        for (n, line) in lines.enumerated() {
+            for (k, v) in line.enumerated() where v & LogFeed.glyphBits != 0 {
+                cells.append((r0 + n, c0 + k, v))
+            }
+        }
+        guard !cells.isEmpty else { return }
+        let box = (c0: max(0, c0 - 1), c1: min(front.cols - 1, c0 + longest), r0: max(0, r0 - 1),
+                   r1: min(front.rows - 1, r0 + lines.count))
+        banner = Banner(cells: cells, box: box, release: cells.map { _ in Float.random(in: 0..<Banner.melt) })
+        lastBanner = CACurrentMediaTime()
     }
 
     // MARK: - Film intro
@@ -1526,6 +1622,15 @@ final class MatrixView: ScreenSaverView {
                             height: CGFloat(box.r1 - box.r0 + 1) * layer.cellH))
         }
 
+        // Darken the layers behind the banner too.
+        if isFront, let box = bannerBox {
+            ctx.setAlpha(1)
+            ctx.setFillColor(CGColor(gray: 0, alpha: 0.85))
+            ctx.fill(CGRect(x: CGFloat(box.c0) * layer.cellW, y: top - CGFloat(box.r1 + 1) * layer.cellH,
+                            width: CGFloat(box.c1 - box.c0 + 1) * layer.cellW,
+                            height: CGFloat(box.r1 - box.r0 + 1) * layer.cellH))
+        }
+
         for r in 0..<layer.rows {
             let y = top - CGFloat(r + 1) * layer.cellH - layer.pad
             let dx = glitchBands.isEmpty ? 0 : glitchShift(atY: y)
@@ -1610,6 +1715,8 @@ final class MatrixView: ScreenSaverView {
         for d in layer.drops where !d.idle && d.lastRow >= 0 && d.lastRow < layer.rows
             && (layer.feed == nil || d.lastRow >= d.startRow) {
             if let box, d.lastRow >= box.r0, d.lastRow <= box.r1, d.col >= box.c0, d.col <= box.c1 { continue }
+            if layer === layers.last, let b = bannerBox,
+               d.lastRow >= b.r0, d.lastRow <= b.r1, d.col >= b.c0, d.col <= b.c1 { continue }
             let y = bounds.height - CGFloat(d.lastRow + 1) * layer.cellH - layer.pad
             let dx = glitchBands.isEmpty ? 0 : glitchShift(atY: y)
             body(Int(layer.chars[d.lastRow * layer.cols + d.col]), CGFloat(d.col) * layer.cellW - layer.pad + dx, y)
@@ -1719,6 +1826,7 @@ private final class OptionsController: NSObject {
     private var levelCheck: NSButton!
     private var volumeCheck: NSButton!
     private var rippleCheck: NSButton!
+    private var bannerCheck: NSButton!
     private var logsNote: NSTextField!
 
     private override init() {
@@ -1793,7 +1901,7 @@ private final class OptionsController: NSObject {
             return f
         }
         func newPage() {
-            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 10))
+            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 11))
             content.addSubview(page)
             pages.append(page)
             parent = page
@@ -1887,10 +1995,11 @@ private final class OptionsController: NSObject {
         levelCheck = checkbox("Colour lines by log level", row: 6, x: controlX)
         volumeCheck = checkbox("More rain when logs are busy", row: 7, x: controlX)
         rippleCheck = checkbox("Ripple when an error arrives", row: 8, x: controlX)
+        bannerCheck = checkbox("Write new errors across the screen", row: 9, x: controlX)
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 9 * rowH + 2, width: wideW, height: rowH * 1.5)
+        logsNote.frame = NSRect(x: controlX, y: 10 * rowH + 2, width: wideW, height: rowH * 1.5)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
@@ -1898,7 +2007,7 @@ private final class OptionsController: NSObject {
         originY = margin
 
         // Credit line. Bundle.main is the host process here, so look up the saver's own bundle.
-        let creditRow: CGFloat = 11.35
+        let creditRow: CGFloat = 12.35
         let version = Bundle(for: OptionsController.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let credit = NSTextField(labelWithString: "Version \(version) · Agent Smith")
         credit.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -1976,6 +2085,7 @@ private final class OptionsController: NSObject {
         levelCheck.state = s.levelColors ? .on : .off
         volumeCheck.state = s.followVolume ? .on : .off
         rippleCheck.state = s.errorRipple ? .on : .off
+        bannerCheck.state = s.errorBanner ? .on : .off
         controlsChanged()
     }
 
@@ -2008,6 +2118,7 @@ private final class OptionsController: NSObject {
         levelCheck.isEnabled = logs
         volumeCheck.isEnabled = logs
         rippleCheck.isEnabled = logs
+        bannerCheck.isEnabled = logs
         logsNote.stringValue = logs
             ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
                     : "Shows the end of the file, then new lines as they are written.")
@@ -2162,6 +2273,7 @@ private final class OptionsController: NSObject {
         s.levelColors = levelCheck.state == .on
         s.followVolume = volumeCheck.state == .on
         s.errorRipple = rippleCheck.state == .on
+        s.errorBanner = bannerCheck.state == .on
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)

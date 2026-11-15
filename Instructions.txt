@@ -93,6 +93,10 @@ Logs (when Characters is set to Logs)
               A new error line sends a ring spreading across the rain
               from where it starts (at most one every 3 seconds; not
               for errors already in the log when the saver starts)
+  Write new errors across the screen
+              A new error line is typed out in red across the middle of
+              the screen, held for a few seconds, then melts into the
+              rain (at most one every 10 seconds)
 
 Logs can show user names, computer names, addresses or network names, so
 mind who can see your screen.

@@ -98,7 +98,7 @@ Tools/render-test.sh   # render test, see below
   exception that freezes the sheet. The controller is independent of any view because System
   Settings drops the view while the sheet is open.
   - Logs tab: Source (file / Loki), Log file, Loki URL, **Services** (pull-down of checkboxes;
-    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives". Pages are 10 rows. Services fetches
+    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives", "Write new errors across the screen". Pages are 11 rows. Services fetches
     `/loki/api/v1/label/service_name/values` for the last 7 days and writes
     `{service_name=~"a|b"}` into Query. Any other query shows as "Custom query".
   - Migration in `Settings.load()`: an `http(s)://` in `logPath` (from a test build) moves to
@@ -208,10 +208,17 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   Before, the 2000-line start fetch covered only the last ~29 min and was half unifi-siem;
   Postgres had 10 lines. Tested with a scratch harness (2000 `nextLine()` calls, all services:
   27 sources, top ones ~6% each) and renders (file and Loki).
+- **2.8** (2026-11-15, was 3.11): **error banner**. `Settings.errorBanner`, Logs tab "Write new
+  errors across the screen", default on. Same trigger as the ripple (`Layer.newErrors`, which
+  now carries the line's text): `MatrixView.stepBanner` types the line (80 letters/s) across the
+  front layer, wrapped at spaces to ≤72 columns and ≤3 rows, in a cleared strip (`bannerBox`:
+  cells zeroed, back layers darkened in `drawLayer`, heads skipped), holds 4 s, then lets
+  letters go at random over 1.5 s so the rain eats them. ≤1 per 10 s. Always in error ink (red,
+  white on red rain) even with level colours off, so ink glyphs are rendered whenever the banner
+  is on. Tested with a scratch harness (append an error to a file mid-run, frames every 0.5 s):
+  typed, readable, melted, gone after ~7 s.
 
 Ideas not done:
-- **Error banner** (next, Troy chose it): show a newly arrived error line once across the screen
-  readably, like hidden messages, then let it melt into rain.
 - Loki basic auth / API token (would be stored in plain text in prefs).
 - Optional "colour the whole line" for keywords.
 - The default `install.log` produces lots of red from "Failed to..." lines; Troy may trim
