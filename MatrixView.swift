@@ -57,6 +57,7 @@ private struct Settings: Equatable {
     var customChars = ""
     var logPath = Settings.defaultLogPath
     var keywords = Settings.defaultKeywords
+    var levelColors = true  // log mode: colour lines by log level
     var logSource = 0   // 0: a file, 1: a Loki server
     var lokiURL = ""
     var lokiQuery = Settings.defaultLokiQuery
@@ -82,7 +83,7 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "logSource": base.logSource, "lokiURL": base.lokiURL,
                               "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
                               "mainDisplayOnly": base.mainDisplayOnly, "clock": base.clock, "intro": base.intro,
@@ -98,6 +99,7 @@ private struct Settings: Equatable {
         s.customChars = d.string(forKey: "customChars") ?? ""
         s.logPath = d.string(forKey: "logPath") ?? base.logPath
         s.keywords = d.string(forKey: "keywords") ?? base.keywords
+        s.levelColors = d.bool(forKey: "levelColors")
         s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
         s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
         s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
@@ -134,6 +136,7 @@ private struct Settings: Equatable {
         d.set(customChars, forKey: "customChars")
         d.set(logPath, forKey: "logPath")
         d.set(keywords, forKey: "keywords")
+        d.set(levelColors, forKey: "levelColors")
         d.set(logSource, forKey: "logSource")
         d.set(lokiURL, forKey: "lokiURL")
         d.set(lokiQuery, forKey: "lokiQuery")
@@ -185,12 +188,19 @@ private struct Settings: Equatable {
             .filter { !$0.isEmpty && $0.unicodeScalars.allSatisfy { (0x20...0x7E).contains($0.value) } }
     }
 
-    /// The colour keywords are drawn in: red, or white when the rain is already reddish (including
-    /// while Colour Cycle passes through red).
-    func keywordColor(cycleHue: Double) -> CGColor {
-        let hue = colorIndex == Self.customColorIndex ? customHue : colorIndex == Self.cycleColorIndex ? cycleHue : nil
+    /// The colours log text keeps after tinting, indexed by `Layer.Ink` (nil: tinted with the rain).
+    /// Keywords and error lines are red, warnings amber; either turns white when the rain is already
+    /// near that colour (including while Colour Cycle passes through it). Keywords on an error line
+    /// are white so they still stand out.
+    func inkColors(cycleHue: Double) -> [CGColor?] {
+        let hue: Double? = colorIndex == Self.customColorIndex ? customHue
+            : colorIndex == Self.cycleColorIndex ? cycleHue : nil
         let reddish = colorIndex == 4 || hue.map { $0 < 0.06 || $0 > 0.94 } == true
-        return reddish ? CGColor(gray: 1, alpha: 1) : CGColor(srgbRed: 1, green: 0.22, blue: 0.18, alpha: 1)
+        let amberish = colorIndex == 5 || hue.map { $0 >= 0.06 && $0 < 0.18 } == true
+        let white = CGColor(gray: 1, alpha: 1)
+        let red = reddish ? white : CGColor(srgbRed: 1, green: 0.22, blue: 0.18, alpha: 1)
+        let amber = amberish ? white : CGColor(srgbRed: 1, green: 0.68, blue: 0.1, alpha: 1)
+        return [nil, red, red, amber, nil, white]
     }
 
     /// The rain's characters, and whether they are mirrored as in the film. Latin, custom and log
@@ -235,8 +245,8 @@ private enum LogSource: Equatable {
 }
 
 /// Log lines for the rain to spell out, as glyph indices (scalar - 0x20, so 0 is a space), with
-/// `LogFeed.keywordBit` set on letters that are part of a keyword. New lines are shown first, then
-/// the history loops.
+/// `LogFeed.keywordBit` set on letters that are part of a keyword and the line's log level in
+/// `levelBits`. New lines are shown first, then the history loops.
 ///
 /// Files: reads the end of the file, then picks up appended lines. legacyScreenSaver's sandbox
 /// allows read-only access to the whole disk, so this is only limited by Unix permissions.
@@ -247,6 +257,11 @@ private final class LogFeed {
     static let maxHistory = 3000
     static let maxLineLength = 200
     static let keywordBit: UInt16 = 0x8000
+    static let levelShift: UInt16 = 13     // bits 13-14: the line's Level
+    static let levelBits: UInt16 = 0x6000
+    static let glyphBits: UInt16 = 0x1FFF
+
+    enum Level: UInt16 { case normal = 0, error, warn, debug }
     static let lokiHistory: Double = 24 * 3600  // seconds fetched at start
     // Loki logs every query it runs, with the query text. Every poll carries this tag and filters
     // it out, so those lines about the saver's own polls don't show up in the rain. Loki also runs
@@ -256,6 +271,7 @@ private final class LogFeed {
 
     let source: LogSource
     let keywordList: [String]
+    let levels: Bool                  // detect log levels, for colour
     private let keywords: [[UInt16]]  // lowercased, as glyph indices
     private var history: [[UInt16]] = []
     private var fresh: [[UInt16]] = []   // arrived since the saver started
@@ -274,16 +290,17 @@ private final class LogFeed {
     /// and the saver has a view per display, and the server should be polled once, not per view.
     private static weak var current: LogFeed?
 
-    static func shared(_ source: LogSource, keywords: [String]) -> LogFeed {
-        if let f = current, f.source == source, f.keywordList == keywords { return f }
-        let f = LogFeed(source: source, keywords: keywords)
+    static func shared(_ source: LogSource, keywords: [String], levels: Bool) -> LogFeed {
+        if let f = current, f.source == source, f.keywordList == keywords, f.levels == levels { return f }
+        let f = LogFeed(source: source, keywords: keywords, levels: levels)
         current = f
         return f
     }
 
-    private init(source: LogSource, keywords: [String]) {
+    private init(source: LogSource, keywords: [String], levels: Bool) {
         self.source = source
         keywordList = keywords
+        self.levels = levels
         self.keywords = keywords.map { $0.unicodeScalars.map { UInt16($0.value - 0x20) } }
         switch source {
         case .file(let path): loadFile(path)
@@ -318,7 +335,7 @@ private final class LogFeed {
     }
 
     private func setStatus(_ message: String) {
-        history = [encode(message)]
+        history = [encode(message, level: .normal)]
         placeholder = true
         cursor = 0
     }
@@ -372,7 +389,10 @@ private final class LogFeed {
         offset = start + UInt64(lastNewline - data.startIndex + 1)
         var lines = data[data.startIndex...lastNewline].split(separator: 0x0A)
         if skipFirst, !lines.isEmpty { lines.removeFirst() }  // probably started mid-line
-        return lines.map { self.encode(Self.stripTimestamp(String(decoding: $0, as: UTF8.self))) }.filter { !$0.isEmpty }
+        return lines.map { raw in
+            let line = Self.stripTimestamp(Self.stripANSI(String(decoding: raw, as: UTF8.self)))
+            return self.encode(line, level: Self.level(of: line))
+        }.filter { !$0.isEmpty }
     }
 
     // MARK: Loki
@@ -404,7 +424,7 @@ private final class LogFeed {
         lokiBusy = true
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            var entries: [(ts: UInt64, line: String)] = []
+            var entries: [(ts: UInt64, line: String, level: Level)] = []
             var failure: String?
             if let error {
                 failure = error.localizedDescription
@@ -416,9 +436,11 @@ private final class LogFeed {
                 for stream in result {
                     let labels = stream["stream"] as? [String: String] ?? [:]
                     let name = labels["container_name"] ?? labels["service_name"] ?? labels["job"] ?? ""
-                    for v in stream["values"] as? [[String]] ?? [] where v.count == 2 {
+                    let labelLevel = LogFeed.level(labels: labels)
+                    for v in stream["values"] as? [[String]] ?? [] where v.count >= 2 {
                         guard let ts = UInt64(v[0]) else { continue }
-                        entries.append((ts, LogFeed.tidy(v[1], from: name)))
+                        let line = LogFeed.tidy(v[1])
+                        entries.append((ts, name.isEmpty ? line : "\(name): \(line)", labelLevel ?? LogFeed.level(of: line)))
                     }
                 }
                 entries.sort { $0.ts < $1.ts }
@@ -431,7 +453,7 @@ private final class LogFeed {
         }.resume()
     }
 
-    private func receive(_ entries: [(ts: UInt64, line: String)], failure: String?, initial: Bool,
+    private func receive(_ entries: [(ts: UInt64, line: String, level: Level)], failure: String?, initial: Bool,
                          asOf now: UInt64, base: String, query: String) {
         lokiBusy = false
         if let failure {
@@ -440,7 +462,7 @@ private final class LogFeed {
             return  // keep showing what we have, and retry
         }
         lokiSince = max(lokiSince, entries.last?.ts ?? now)
-        let lines = entries.map { encode($0.line) }.filter { !$0.isEmpty }
+        let lines = entries.map { encode($0.line, level: $0.level) }.filter { !$0.isEmpty }
         if initial {
             lokiOK = true
             if lines.isEmpty {
@@ -458,11 +480,12 @@ private final class LogFeed {
     // MARK: Cleaning up lines
 
     // Leading timestamps eat most of a column and repeat line after line, so drop them: ISO dates
-    // ("2026-11-06 10:22:01+01", "2026-11-06 11:24:51.319 CET") and syslog dates
+    // ("2026-11-06 10:22:01+01", "2026-11-06 11:24:51.319 CET", but not a level such as "INF" in
+    // that place) and syslog dates
     // ("Fri Nov  6 10:28:56.515"). Drop the host name after one too ("macbook-pro Safari[53369]:"
     // keeps "Safari[53369]:").
     private static let timestamp = try! NSRegularExpression(pattern:
-        #"^(\d{4}-\d{2}-\d{2}[ T][\d:.]+(Z|[+-]\d{2}:?\d{0,2})?( [A-Z]{3,5})?|([A-Z][a-z]{2} )?[A-Z][a-z]{2} +\d{1,2} \d\d:\d\d:\d\d(\.\d+)?)\s+(\S+ (?=[^\s\[]+\[\d+\]:))?"#)
+        #"^(\d{4}-\d{2}-\d{2}[ T][\d:.]+(Z|[+-]\d{2}:?\d{0,2})?( (?!(INF|ERR|WRN|DBG|TRC|FTL|PNC|INFO|WARN|ERROR|DEBUG|TRACE|FATAL|PANIC|CRIT)\b)[A-Z]{3,5})?|([A-Z][a-z]{2} )?[A-Z][a-z]{2} +\d{1,2} \d\d:\d\d:\d\d(\.\d+)?)\s+(\S+ (?=[^\s\[]+\[\d+\]:))?"#)
     // logfmt fields that are noise in the rain: timestamps (Loki has its own), source locations, ids.
     private static let logfmtNoise = try! NSRegularExpression(pattern:
         #"(^|\s)(ts|time|caller|org_id|query_hash|traceID|spanID)=("[^"]*"|\S+)"#)
@@ -478,9 +501,9 @@ private final class LogFeed {
     }
 
     /// Makes a line from Loki readable in the rain: JSON becomes "level message key=value", logfmt
-    /// loses its noise fields, and the line is prefixed with the container it came from.
-    static func tidy(_ raw: String, from name: String) -> String {
-        var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// loses its noise fields. The caller prefixes it with the container it came from.
+    static func tidy(_ raw: String) -> String {
+        var line = stripANSI(raw).trimmingCharacters(in: .whitespacesAndNewlines)
         if line.hasPrefix("{"), let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
             let skip: Set = ["level", "lvl", "msg", "message", "time", "ts", "timestamp", "@timestamp"]
             var parts: [String] = []
@@ -492,11 +515,82 @@ private final class LogFeed {
             line = replace(logfmtNoise, in: line, with: "")
         }
         line = stripTimestamp(line.trimmingCharacters(in: .whitespaces))
-        line = replace(repeatedWord, in: line, with: "$1")
-        return name.isEmpty ? line : "\(name): \(line)"
+        return replace(repeatedWord, in: line, with: "$1")
     }
 
-    private func encode(_ text: String) -> [UInt16] {
+    // MARK: Log levels
+
+    // Terminal colour codes, as in "[\u{1B}[32minfo\u{1B}[39m]": the escape has no glyph and the rest
+    // would rain as "[32m".
+    private static let ansi = try! NSRegularExpression(pattern: #"\x1B\[[0-9;?]*[A-Za-z]"#)
+    // "level=warn", "lvl: error", "severity=ERROR", "loglevel=debug".
+    private static let levelField = try! NSRegularExpression(pattern:
+        #"(?i)(?:^|[\s{,])(?:level|lvl|severity|loglevel)\s*[=:]\s*"?([a-z]+)"#)
+    // A word that may be a level: letters alone, with anything but letters, digits, "_", "=" or "-"
+    // around it, so "errors=0" and "error-page" don't count.
+    private static let levelWord = try! NSRegularExpression(pattern: #"(?<![A-Za-z0-9_=-])([A-Za-z]{3,9})(?![A-Za-z0-9_=-])"#)
+    // glog: "E1114 10:00:00.123456 ..."
+    private static let glog = try! NSRegularExpression(pattern: #"^([EWIF])\d{4} "#)
+    // CEF (UniFi SIEM): "CEF:0|vendor|product|version|id|name|severity|"
+    private static let cef = try! NSRegularExpression(pattern: #"CEF:\d+(?:\|[^|]*){5}\|(\d+)\|"#)
+
+    static func stripANSI(_ s: String) -> String {
+        s.contains("\u{1B}") ? replace(ansi, in: s, with: "") : s
+    }
+
+    private static func level(word: String) -> Level? {
+        switch word.lowercased() {
+        case "error", "err", "eror", "erro", "fatal", "fatl", "ftl", "crit", "critical", "crt", "panic",
+             "pnc", "alert", "emerg", "emergency", "severe": return .error
+        case "warn", "warning", "wrn", "wrng": return .warn
+        case "debug", "dbg", "dbug", "trace", "trc", "trce", "verbose", "vrb": return .debug
+        case "info", "inf", "information", "notice", "log": return .normal
+        default: return nil
+        }
+    }
+
+    /// CEF severity 0-10: 7 and up is high, 5-6 medium.
+    private static func level(cefSeverity n: Int) -> Level {
+        n >= 7 ? .error : n >= 5 ? .warn : .normal
+    }
+
+    /// The level from Loki's stream labels, if it has one: `detected_level` or `level`, or a numeric
+    /// CEF `severity` as UniFi's SIEM sends.
+    static func level(labels: [String: String]) -> Level? {
+        if let w = labels["detected_level"] ?? labels["level"], let l = level(word: w), w != "unknown" { return l }
+        if let s = labels["severity"] { return Int(s).map(level(cefSeverity:)) ?? level(word: s) }
+        return nil
+    }
+
+    /// Guesses a line's level from its text (timestamp and container name already removed). Looks at
+    /// a level field, then the first level word in the start of the line: in any case if it is the
+    /// first word or bracketed ("[info]", "<warn>", ":INFO:"), but only in capitals elsewhere, so a
+    /// message that mentions an error isn't taken for one.
+    static func level(of line: String) -> Level {
+        let ns = line as NSString
+        let all = NSRange(location: 0, length: ns.length)
+        if let m = levelField.firstMatch(in: line, range: all), let l = level(word: ns.substring(with: m.range(at: 1))) {
+            return l
+        }
+        if let m = cef.firstMatch(in: line, range: all), let n = Int(ns.substring(with: m.range(at: 1))) {
+            return level(cefSeverity: n)
+        }
+        if let m = glog.firstMatch(in: line, range: all) {
+            return ["E": .error, "F": .error, "W": .warn][ns.substring(with: m.range(at: 1))] ?? .normal
+        }
+        let head = NSRange(location: 0, length: min(ns.length, 80))
+        for m in levelWord.matches(in: line, range: head) {
+            let r = m.range(at: 1)
+            let word = ns.substring(with: r)
+            guard let l = level(word: word) else { continue }
+            let before = r.location > 0 ? ns.substring(with: NSRange(location: r.location - 1, length: 1)) : ""
+            let first = ns.substring(to: r.location).trimmingCharacters(in: .whitespaces).isEmpty
+            if first || "[<(|:".contains(before) && !before.isEmpty || word == word.uppercased() { return l }
+        }
+        return .normal
+    }
+
+    private func encode(_ text: String, level: Level) -> [UInt16] {
         var out: [UInt16] = []
         for u in text.unicodeScalars {
             switch u.value {
@@ -509,7 +603,22 @@ private final class LogFeed {
         while out.last == 0 { out.removeLast() }
         while out.first == 0 { out.removeFirst() }
         markKeywords(&out)
+        if levels, level != .normal {
+            for i in out.indices { out[i] |= level.rawValue << Self.levelShift }
+        }
         return out
+    }
+
+    /// How a cell holding glyph value `v` is drawn (see Layer.Ink).
+    static func ink(_ v: UInt16) -> UInt8 {
+        let level = Level(rawValue: (v & levelBits) >> levelShift) ?? .normal
+        if v & keywordBit != 0 { return level == .error ? Layer.Ink.keywordOnError : Layer.Ink.keyword }
+        switch level {
+        case .normal: return Layer.Ink.plain
+        case .error: return Layer.Ink.error
+        case .warn: return Layer.Ink.warn
+        case .debug: return Layer.Ink.debug
+        }
     }
 
     /// Sets the keyword bit on every letter of each keyword found, ignoring case.
@@ -530,6 +639,18 @@ private final class LogFeed {
 /// One plane of rain: a grid of cells with a fading brightness trail per column, and pre-rendered
 /// white glyphs. Depth mode stacks three, drawn back to front.
 private final class Layer {
+    /// How a log cell is drawn: tinted with the rain, dimmed, or in its own colour after tinting
+    /// (`inkGlyphs`, colours from `Settings.inkColors`).
+    enum Ink {
+        static let plain: UInt8 = 0
+        static let keyword: UInt8 = 1
+        static let error: UInt8 = 2
+        static let warn: UInt8 = 3
+        static let debug: UInt8 = 4        // tinted, but dim
+        static let keywordOnError: UInt8 = 5
+        static func coloured(_ ink: UInt8) -> Bool { ink != plain && ink != debug }
+    }
+
     struct Drop {
         var col: Int
         var y: Float        // head position in rows (fractional)
@@ -550,7 +671,7 @@ private final class Layer {
 
     var chars: [UInt16] = []      // glyph index per cell (row-major)
     var bright: [Float] = []      // 0...1 per cell
-    var hot: [Bool] = []          // log mode: cell holds part of a keyword, drawn in red
+    var ink: [UInt8] = []         // log mode: how each cell is drawn (Ink)
     var fade: [Float] = []        // brightness lost per second, per column
     var drops: [Drop] = []
     var randomGlyphs: UInt16 = 1  // glyphs the rain may pick; message letters follow these
@@ -559,7 +680,7 @@ private final class Layer {
     var trailGlyphs: [CGImage] = []  // white, soft glow; tinted with the frame
     var headGlyphs: [CGImage] = []   // white, full glow; tinted with the frame
     var coreGlyphs: [CGImage] = []   // white, no glow; drawn after tinting so heads stay near-white
-    var hotGlyphs: [CGImage] = []    // log mode: keyword colour with glow; drawn after tinting
+    var inkGlyphs: [[CGImage]] = []  // log mode: per Ink, glyphs in their colour with glow; drawn after tinting
     var glyphEntries: [(String, Bool)] = []  // what the glyph images show, and whether mirrored
     var fontSize: CGFloat = 0
 
@@ -606,8 +727,8 @@ private final class Layer {
                     // A spent line ends the drop; its trail fades as usual.
                     guard drops[i].pos < drops[i].text.count else { drops[i].lastRow = rows + 4; break }
                     let v = drops[i].text[drops[i].pos]
-                    chars[idx] = v & ~LogFeed.keywordBit
-                    hot[idx] = v & LogFeed.keywordBit != 0
+                    chars[idx] = v & LogFeed.glyphBits
+                    ink[idx] = LogFeed.ink(v)
                     drops[i].pos += 1
                 } else {
                     chars[idx] = UInt16.random(in: 0..<randomGlyphs)
@@ -659,7 +780,7 @@ final class MatrixView: ScreenSaverView {
     private var crtImage: CGImage?
     private var logFeed: LogFeed?
     private var glyphScale: CGFloat = 2
-    private var keywordTint: CGColor?  // colour hotGlyphs were rendered in, if any
+    private var inkTint: [CGColor?]?   // colours inkGlyphs were rendered in, if any
 
     private var introLines: [String] = []
     private var introActive = false
@@ -735,7 +856,8 @@ final class MatrixView: ScreenSaverView {
 
         let (strings, mirrored) = settings.glyphs
         if settings.charset == Settings.logCharset {
-            logFeed = LogFeed.shared(settings.logSourceValue, keywords: settings.keywordList)
+            logFeed = LogFeed.shared(settings.logSourceValue, keywords: settings.keywordList,
+                                     levels: settings.levelColors)
         } else {
             logFeed = nil
         }
@@ -762,7 +884,7 @@ final class MatrixView: ScreenSaverView {
 
             layer.chars = (0..<(layer.cols * layer.rows)).map { _ in UInt16.random(in: 0..<layer.randomGlyphs) }
             layer.bright = Array(repeating: 0, count: layer.cols * layer.rows)
-            layer.hot = Array(repeating: false, count: layer.cols * layer.rows)
+            layer.ink = Array(repeating: Layer.Ink.plain, count: layer.cols * layer.rows)
             layer.fade = (0..<layer.cols).map { _ in layer.randomFade(speed: speed) }
             let dropCount = Double(layer.cols) * 0.9 * settings.density * Settings.densityScale * plane.share
             layer.drops = (0..<max(1, Int(dropCount))).map { _ in
@@ -784,8 +906,8 @@ final class MatrixView: ScreenSaverView {
             return layer
         }
         glyphScale = scale
-        keywordTint = nil
-        if logFeed != nil, !settings.keywordList.isEmpty { renderKeywordGlyphs() }
+        inkTint = nil
+        if logFeed != nil, !settings.keywordList.isEmpty || settings.levelColors { renderInkGlyphs() }
 
         // These all hold positions in the old grid.
         message = nil
@@ -828,14 +950,22 @@ final class MatrixView: ScreenSaverView {
         }
     }
 
-    /// Renders the keyword glyphs in the current keyword colour. Colour Cycle calls this again when
-    /// the hue moves into or out of red.
-    private func renderKeywordGlyphs() {
-        let color = settings.keywordColor(cycleHue: cycleHue)
-        keywordTint = color
+    /// Renders the glyphs for coloured log text (keywords, error and warning lines). Colour Cycle
+    /// calls this again when the hue moves into or out of red or amber. Colours shared by several
+    /// inks are rendered once.
+    private func renderInkGlyphs() {
+        let colors = settings.inkColors(cycleHue: cycleHue)
+        inkTint = colors
         for layer in layers {
-            layer.hotGlyphs = renderGlyphs(layer.glyphEntries, layer: layer, fontSize: layer.fontSize,
-                                           scale: glyphScale, glow: color.copy(alpha: 0.8), color: color)
+            var done: [(CGColor, [CGImage])] = []
+            layer.inkGlyphs = colors.map { color in
+                guard let color else { return [] }
+                if let hit = done.first(where: { $0.0 == color }) { return hit.1 }
+                let glyphs = renderGlyphs(layer.glyphEntries, layer: layer, fontSize: layer.fontSize,
+                                          scale: glyphScale, glow: color.copy(alpha: 0.8), color: color)
+                done.append((color, glyphs))
+                return glyphs
+            }
         }
     }
 
@@ -895,9 +1025,9 @@ final class MatrixView: ScreenSaverView {
     private func step(_ dt: Float) {
         guard let front = layers.last, dt > 0 else { return }
         cycleHue = (cycleHue + Double(dt) / 120).truncatingRemainder(dividingBy: 1)
-        if settings.colorIndex == Settings.cycleColorIndex, let tint = keywordTint,
-           settings.keywordColor(cycleHue: cycleHue) != tint {
-            renderKeywordGlyphs()
+        if settings.colorIndex == Settings.cycleColorIndex, let tint = inkTint,
+           settings.inkColors(cycleHue: cycleHue) != tint {
+            renderInkGlyphs()
         }
 
         if introActive {
@@ -1017,7 +1147,7 @@ final class MatrixView: ScreenSaverView {
             for i in 0..<m.shown {
                 let idx = (m.row + i) * front.cols + m.col
                 front.chars[idx] = m.letters[i]
-                front.hot[idx] = false
+                front.ink[idx] = Layer.Ink.plain
                 front.bright[idx] = 1
             }
             message = m
@@ -1058,7 +1188,7 @@ final class MatrixView: ScreenSaverView {
                     let idx = r * front.cols + c
                     front.bright[idx] = Float.random(in: 0.2...1)
                     front.chars[idx] = UInt16.random(in: 0..<front.randomGlyphs)
-                    front.hot[idx] = false
+                    front.ink[idx] = Layer.Ink.plain
                 }
             }
             return false
@@ -1121,7 +1251,7 @@ final class MatrixView: ScreenSaverView {
         ctx.setBlendMode(.normal)
 
         if !introActive {
-            for layer in layers where !layer.hotGlyphs.isEmpty { drawKeywords(layer, ctx, isFront: layer === front) }
+            for layer in layers where !layer.inkGlyphs.isEmpty { drawInk(layer, ctx, isFront: layer === front) }
             for layer in layers { drawCores(layer, ctx, isFront: layer === front) }
             if let m = message { drawMessage(m, front, ctx) }
         }
@@ -1156,8 +1286,17 @@ final class MatrixView: ScreenSaverView {
                 if let box, r >= box.r0, r <= box.r1, c >= box.c0, c <= box.c1 {
                     b = clockMask[base + c] ? max(b, 0.95) : b * 0.3
                 }
-                if b < 0.02 || layer.hot[base + c] { continue }  // keywords are drawn after tinting
-                ctx.setAlpha(CGFloat(b * b) * layer.alpha)
+                if b < 0.02 { continue }
+                var alpha = CGFloat(b * b) * layer.alpha
+                if !layer.ink.isEmpty {
+                    let ink = layer.ink[base + c]
+                    if ink == Layer.Ink.debug {
+                        alpha *= 0.4
+                    } else if Layer.Ink.coloured(ink) && !layer.inkGlyphs.isEmpty {
+                        continue  // drawn after tinting
+                    }
+                }
+                ctx.setAlpha(alpha)
                 ctx.draw(layer.trailGlyphs[Int(layer.chars[base + c])],
                          in: CGRect(x: CGFloat(c) * layer.cellW - layer.pad + dx, y: y, width: imgW, height: imgH))
             }
@@ -1169,9 +1308,9 @@ final class MatrixView: ScreenSaverView {
         }
     }
 
-    /// Keyword cells in log mode, skipped by drawLayer and drawn here after tinting so they keep
-    /// their own colour. They fade like the rest of the trail.
-    private func drawKeywords(_ layer: Layer, _ ctx: CGContext, isFront: Bool) {
+    /// Coloured cells in log mode (keywords, error and warning lines), skipped by drawLayer and drawn
+    /// here after tinting so they keep their own colour. They fade like the rest of the trail.
+    private func drawInk(_ layer: Layer, _ ctx: CGContext, isFront: Bool) {
         let imgW = layer.cellW + layer.pad * 2
         let imgH = layer.cellH + layer.pad * 2
         let box = settings.clock && isFront ? clockBox : nil
@@ -1179,7 +1318,7 @@ final class MatrixView: ScreenSaverView {
             let y = bounds.height - CGFloat(r + 1) * layer.cellH - layer.pad
             let dx = glitchBands.isEmpty ? 0 : glitchShift(atY: y)
             let base = r * layer.cols
-            for c in 0..<layer.cols where layer.hot[base + c] {
+            for c in 0..<layer.cols where Layer.Ink.coloured(layer.ink[base + c]) {
                 var b = layer.bright[base + c]
                 if let box, r >= box.r0, r <= box.r1, c >= box.c0, c <= box.c1 {
                     b = clockMask[base + c] ? max(b, 0.95) : b * 0.3
@@ -1188,7 +1327,8 @@ final class MatrixView: ScreenSaverView {
                 // Brighter than the trail around it (which fades as b squared): red reads darker
                 // than green, and keywords should stand out.
                 ctx.setAlpha(CGFloat(min(1, b * 1.5)) * layer.alpha)
-                ctx.draw(layer.hotGlyphs[Int(layer.chars[base + c])],
+                let glyphs = layer.inkGlyphs[Int(layer.ink[base + c])]
+                ctx.draw(glyphs[Int(layer.chars[base + c])],
                          in: CGRect(x: CGFloat(c) * layer.cellW - layer.pad + dx, y: y, width: imgW, height: imgH))
             }
         }
@@ -1327,6 +1467,7 @@ private final class OptionsController: NSObject {
     private var servicesStatus = ""            // shown in the menu while there is no list
     private var fetchedURL = ""                // Loki address the list came (or is coming) from
     private var keywordsField: NSTextField!
+    private var levelCheck: NSButton!
     private var logsNote: NSTextField!
 
     private override init() {
@@ -1492,10 +1633,11 @@ private final class OptionsController: NSObject {
         label("Keywords:", row: 5)
         keywordsField = textField(row: 5, x: controlX, width: wideW)
         keywordsField.placeholderString = "Shown in red; separate with commas"
+        levelCheck = checkbox("Colour lines by log level", row: 6, x: controlX)
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 6 * rowH + 6, width: wideW, height: rowH * 2)
+        logsNote.frame = NSRect(x: controlX, y: 7 * rowH + 2, width: wideW, height: rowH * 1.5)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
@@ -1578,6 +1720,7 @@ private final class OptionsController: NSObject {
         lokiQueryField.stringValue = s.lokiQuery
         rebuildServicesMenu()
         keywordsField.stringValue = s.keywords
+        levelCheck.state = s.levelColors ? .on : .off
         controlsChanged()
     }
 
@@ -1607,6 +1750,7 @@ private final class OptionsController: NSObject {
         servicesButton.isEnabled = logs && loki
         if logs && loki { fetchServices() }
         keywordsField.isEnabled = logs
+        levelCheck.isEnabled = logs
         logsNote.stringValue = logs
             ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
                     : "Shows the end of the file, then new lines as they are written.")
@@ -1758,6 +1902,7 @@ private final class OptionsController: NSObject {
         s.messages = messagesCheck.state == .on
         s.messageText = messagesField.stringValue
         s.keywords = keywordsField.stringValue
+        s.levelColors = levelCheck.state == .on
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)

@@ -77,6 +77,12 @@ Logs (when Characters is set to Logs)
   Keywords    Shown in red (white if the rain itself is red). Separate
               them with commas; case is ignored and "fail" also matches
               "Failed"
+  Colour lines by log level
+              Error lines are shown in red, warnings in amber, debug
+              lines dimmed (white instead of red or amber if the rain
+              is that colour). Levels are read from the line, e.g.
+              level=error, ERR, [warn] or WARNING:, or from Loki's
+              level labels
 
 Logs can show user names, computer names, addresses or network names, so
 mind who can see your screen.

@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.2**.
+- Current version: **2.3**.
 
 ## Features
 
@@ -37,7 +37,9 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
   services you want from the list Loki has, or type any LogQL query. It shows the last day of
   lines, then new ones as they arrive.
 - **Keywords** such as `error, fail, denied, fatal` are shown in red (white on red rain).
-- Lines are tidied for the rain: timestamps and repeated host names are removed, JSON logs become
+- **Log levels:** error lines are red, warnings amber and debug lines dimmed. The level comes from
+  the line (`level=error`, `ERR`, `[warn]`, `WARNING:`, a CEF severity) or from Loki's labels.
+- Lines are tidied for the rain: terminal colour codes, timestamps and repeated host names are removed, JSON logs become
   `level message key=value`, and logfmt noise (`ts=`, `caller=`, …) is dropped.
 
 > Logs can contain user names, host names, IP addresses and network names. Mind who can see your
@@ -104,7 +106,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.2' -c 'Set :CFBundleVersion 5' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.3' -c 'Set :CFBundleVersion 6' Info.plist
 ```
 
 ### Render test
@@ -163,6 +165,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.3 | Log lines coloured by level: errors red, warnings amber, debug dimmed |
 | 2.2 | Fixes: no stray character above a log line as it starts; an empty log file or Loki service list says so; keywords follow Colour Cycle |
 | 2.1 | Logs fall at the same speed as Film; all rain 20% slower at every Speed setting |
 | 2.0 | Logs: rain made of a log file's lines, keywords in red, Loki as a log source with a Services picker, and a Logs tab |

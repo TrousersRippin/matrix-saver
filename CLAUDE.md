@@ -65,14 +65,22 @@ Tools/render-test.sh   # render test, see below
     about the saver's own queries; Loki's per-query stats lines drop the tag, hence the second
     filter.
   - Keywords: matched case-insensitively when a line is encoded; matching letters carry
-    `LogFeed.keywordBit` (0x8000) and become `hot` cells, drawn red (white if the rain is red, including while Colour Cycle passes
-    through red: `renderKeywordGlyphs()` re-renders `hotGlyphs` when the cycle crosses that edge).
+    `LogFeed.keywordBit` (0x8000) and become `Layer.Ink.keyword` cells, drawn red after tinting
+    (white if the rain is red, including while Colour Cycle passes through red).
+  - **Levels** (`Settings.levelColors`, default on): `LogFeed.level(of:)` / `level(labels:)` guess
+    each line's level (level= field, CEF severity, glog prefix, else the first level word near
+    the start: any case if first or bracketed, capitals only elsewhere). It goes in glyph bits
+    13-14 (`levelBits`). Each cell gets a `Layer.Ink` class (plain, keyword, error, warn, debug,
+    keyword-on-error); `Settings.inkColors` gives the colours (red, amber, white when the rain is
+    near that colour) and `renderInkGlyphs()` renders one glyph set per colour, re-rendered when
+    Colour Cycle crosses an edge. Debug is drawn tinted at 0.4 alpha. ANSI colour codes are
+    stripped from lines.
 - **Options sheet** (`OptionsController`): tabs Rain, Effects, Text, Logs. Laid out with **fixed
   frames, not Auto Layout**: in legacyScreenSaver an unsatisfiable constraint is an uncaught
   exception that freezes the sheet. The controller is independent of any view because System
   Settings drops the view while the sheet is open.
   - Logs tab: Source (file / Loki), Log file, Loki URL, **Services** (pull-down of checkboxes;
-    checkbox views in menu items keep the menu open), Query, Keywords. Services fetches
+    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level". Services fetches
     `/loki/api/v1/label/service_name/values` for the last 7 days and writes
     `{service_name=~"a|b"}` into Query. Any other query shows as "Custom query".
   - Migration in `Settings.load()`: an `http(s)://` in `logPath` (from a test build) moves to
@@ -158,6 +166,9 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   row (it showed a stale random glyph); an empty log file says IS EMPTY, not CANNOT READ; an
   empty Loki service list says so instead of "Loading services…"; keyword colour follows Colour
   Cycle.
+- **2.3** (2026-11-15, was 3.6): **colour by log level** (Logs tab checkbox). Also fixed: ANSI
+  colour codes rained as "[32m"; the timestamp stripper ate zerolog levels (`INF`, `ERR`) after
+  ISO times, taking them for a time zone.
 
 Ideas not done:
 - Loki basic auth / API token (would be stored in plain text in prefs).
