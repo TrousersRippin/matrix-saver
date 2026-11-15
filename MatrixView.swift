@@ -185,9 +185,11 @@ private struct Settings: Equatable {
             .filter { !$0.isEmpty && $0.unicodeScalars.allSatisfy { (0x20...0x7E).contains($0.value) } }
     }
 
-    /// The colour keywords are drawn in: red, or white when the rain is already reddish.
-    var keywordColor: CGColor {
-        let reddish = colorIndex == 4 || (colorIndex == Self.customColorIndex && (customHue < 0.06 || customHue > 0.94))
+    /// The colour keywords are drawn in: red, or white when the rain is already reddish (including
+    /// while Colour Cycle passes through red).
+    func keywordColor(cycleHue: Double) -> CGColor {
+        let hue = colorIndex == Self.customColorIndex ? customHue : colorIndex == Self.cycleColorIndex ? cycleHue : nil
+        let reddish = colorIndex == 4 || hue.map { $0 < 0.06 || $0 > 0.94 } == true
         return reddish ? CGColor(gray: 1, alpha: 1) : CGColor(srgbRed: 1, green: 0.22, blue: 0.18, alpha: 1)
     }
 
@@ -354,7 +356,10 @@ private final class LogFeed {
         }
         let start = size > Self.tailBytes ? size - Self.tailBytes : 0
         history = Array(read(path, from: start, skipFirst: start > 0).suffix(Self.maxHistory))
-        if history.isEmpty { setStatus(offset == 0 ? "CANNOT READ \(path)" : "\(path) IS EMPTY") }
+        if history.isEmpty {
+            let readable = FileHandle(forReadingAtPath: path).map { try? $0.close(); return true } ?? false
+            setStatus(readable ? "\(path) IS EMPTY" : "CANNOT READ \(path)")
+        }
         cursor = max(0, history.count - 400)  // start near the end, where the recent entries are
     }
 
@@ -555,6 +560,8 @@ private final class Layer {
     var headGlyphs: [CGImage] = []   // white, full glow; tinted with the frame
     var coreGlyphs: [CGImage] = []   // white, no glow; drawn after tinting so heads stay near-white
     var hotGlyphs: [CGImage] = []    // log mode: keyword colour with glow; drawn after tinting
+    var glyphEntries: [(String, Bool)] = []  // what the glyph images show, and whether mirrored
+    var fontSize: CGFloat = 0
 
     init(alpha: CGFloat, speedScale: Float) {
         self.alpha = alpha
@@ -651,6 +658,8 @@ final class MatrixView: ScreenSaverView {
     private var cycleHue = 0.37
     private var crtImage: CGImage?
     private var logFeed: LogFeed?
+    private var glyphScale: CGFloat = 2
+    private var keywordTint: CGColor?  // colour hotGlyphs were rendered in, if any
 
     private var introLines: [String] = []
     private var introActive = false
@@ -770,13 +779,13 @@ final class MatrixView: ScreenSaverView {
                                              glow: CGColor(gray: 0.8, alpha: 0.7))
             layer.headGlyphs = renderGlyphs(entries, layer: layer, fontSize: font, scale: scale, glow: white)
             layer.coreGlyphs = renderGlyphs(entries, layer: layer, fontSize: font, scale: scale, glow: nil)
-            if logFeed != nil, !settings.keywordList.isEmpty {
-                let color = settings.keywordColor
-                layer.hotGlyphs = renderGlyphs(entries, layer: layer, fontSize: font, scale: scale,
-                                               glow: color.copy(alpha: 0.8), color: color)
-            }
+            layer.glyphEntries = entries
+            layer.fontSize = font
             return layer
         }
+        glyphScale = scale
+        keywordTint = nil
+        if logFeed != nil, !settings.keywordList.isEmpty { renderKeywordGlyphs() }
 
         // These all hold positions in the old grid.
         message = nil
@@ -816,6 +825,17 @@ final class MatrixView: ScreenSaverView {
                                        y: layer.pad + layer.cellH * 0.18)
             CTLineDraw(line, ctx)
             return ctx.makeImage()
+        }
+    }
+
+    /// Renders the keyword glyphs in the current keyword colour. Colour Cycle calls this again when
+    /// the hue moves into or out of red.
+    private func renderKeywordGlyphs() {
+        let color = settings.keywordColor(cycleHue: cycleHue)
+        keywordTint = color
+        for layer in layers {
+            layer.hotGlyphs = renderGlyphs(layer.glyphEntries, layer: layer, fontSize: layer.fontSize,
+                                           scale: glyphScale, glow: color.copy(alpha: 0.8), color: color)
         }
     }
 
@@ -875,6 +895,10 @@ final class MatrixView: ScreenSaverView {
     private func step(_ dt: Float) {
         guard let front = layers.last, dt > 0 else { return }
         cycleHue = (cycleHue + Double(dt) / 120).truncatingRemainder(dividingBy: 1)
+        if settings.colorIndex == Settings.cycleColorIndex, let tint = keywordTint,
+           settings.keywordColor(cycleHue: cycleHue) != tint {
+            renderKeywordGlyphs()
+        }
 
         if introActive {
             introTime += Double(dt)
@@ -1193,7 +1217,9 @@ final class MatrixView: ScreenSaverView {
 
     private func forEachVisibleHead(_ layer: Layer, box: (c0: Int, c1: Int, r0: Int, r1: Int)?,
                                     _ body: (Int, CGFloat, CGFloat) -> Void) {
-        for d in layer.drops where d.lastRow >= 0 && d.lastRow < layer.rows {
+        // A log drop has no head until it reaches the row its line starts at.
+        for d in layer.drops where d.lastRow >= 0 && d.lastRow < layer.rows
+            && (layer.feed == nil || d.lastRow >= d.startRow) {
             if let box, d.lastRow >= box.r0, d.lastRow <= box.r1, d.col >= box.c0, d.col <= box.c1 { continue }
             let y = bounds.height - CGFloat(d.lastRow + 1) * layer.cellH - layer.pad
             let dx = glitchBands.isEmpty ? 0 : glitchShift(atY: y)
@@ -1682,6 +1708,7 @@ private final class OptionsController: NSObject {
                 guard let self, self.fetchedURL == root else { return }  // the address changed meanwhile
                 if let names {
                     self.knownServices = names.sorted()
+                    if names.isEmpty { self.servicesStatus = "No services in the last 7 days" }
                 } else {
                     self.servicesStatus = "Can't reach Loki at \(root)"
                     self.fetchedURL = ""  // try again next time

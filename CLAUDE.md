@@ -65,7 +65,8 @@ Tools/render-test.sh   # render test, see below
     about the saver's own queries; Loki's per-query stats lines drop the tag, hence the second
     filter.
   - Keywords: matched case-insensitively when a line is encoded; matching letters carry
-    `LogFeed.keywordBit` (0x8000) and become `hot` cells, drawn red (white if the rain is red).
+    `LogFeed.keywordBit` (0x8000) and become `hot` cells, drawn red (white if the rain is red, including while Colour Cycle passes
+    through red: `renderKeywordGlyphs()` re-renders `hotGlyphs` when the cycle crosses that edge).
 - **Options sheet** (`OptionsController`): tabs Rain, Effects, Text, Logs. Laid out with **fixed
   frames, not Auto Layout**: in legacyScreenSaver an unsatisfiable constraint is an uncaught
   exception that freezes the sheet. The controller is independent of any view because System
@@ -153,6 +154,10 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   long enough to read). All rain 20% slower at every Speed setting: `Settings.baseSpeed = 0.8`
   multiplies `settings.speed` (drops and fade together, so trails keep their length); the slider
   still reads 1.00×.
+- **2.2** (2026-11-14, was the 3.5 rebuild): bug fixes. Log drops show no head above their start
+  row (it showed a stale random glyph); an empty log file says IS EMPTY, not CANNOT READ; an
+  empty Loki service list says so instead of "Loading services…"; keyword colour follows Colour
+  Cycle.
 
 Ideas not done:
 - Loki basic auth / API token (would be stored in plain text in prefs).
