@@ -1,8 +1,18 @@
 #!/bin/zsh
 # Builds Matrix.saver and packages it into dist/Matrix-<version>.dmg, with a styled
 # Finder window and Instructions.txt. Finder may ask for permission to be automated.
+# --zip also makes dist/Matrix-<version>.zip (a Matrix-<version> folder with the saver and
+# Instructions.txt), for sites that don't accept DMGs.
 set -euo pipefail
 cd "${0:A:h}"
+
+ZIP=0
+for arg in "$@"; do
+  case $arg in
+    --zip) ZIP=1 ;;
+    *) echo "usage: $0 [--zip]" >&2; exit 1 ;;
+  esac
+done
 
 ./build.sh
 
@@ -73,3 +83,19 @@ trap - EXIT
 hdiutil convert -quiet -ov "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 rm -rf "$WORK"
 echo "Built $DMG"
+
+if (( ZIP )); then
+  # ditto, not zip: it copies the bundle exactly (structure, permissions), so the code signature
+  # still verifies once unzipped. --norsrc leaves out extended attributes: here they are only this
+  # Mac's bookkeeping (com.apple.provenance, com.apple.macl), and they'd show up as ._ files.
+  ZIPFILE="dist/Matrix-$VERSION.zip"
+  ZIPDIR="build/zip/Matrix-$VERSION"
+  rm -rf build/zip
+  mkdir -p "$ZIPDIR"
+  ditto build/Matrix.saver "$ZIPDIR/Matrix.saver"
+  cp Instructions.txt "$ZIPDIR/"
+  rm -f "$ZIPFILE"
+  ditto -c -k --norsrc --keepParent "$ZIPDIR" "$ZIPFILE"
+  rm -rf build/zip
+  echo "Built $ZIPFILE"
+fi

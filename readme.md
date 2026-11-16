@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.8**.
+- Current version: **2.9**.
 
 ## Features
 
@@ -56,7 +56,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 ### From a release
 
-1. Open `Matrix-<version>.dmg` and double-click `Matrix.saver`.
+1. Open `Matrix-<version>.dmg` (or unzip `Matrix-<version>.zip`) and double-click `Matrix.saver`.
 2. Choose whether to install for just you or for all users.
 3. In System Settings, choose **Matrix** and click **Options** to set it up.
 
@@ -79,7 +79,7 @@ That builds `build/Matrix.saver`, copies it to `~/Library/Screen Savers`, and re
 saver host so the new build loads. Reopen System Settings if it was open.
 
 [`Instructions.txt`](Instructions.txt) is the end-user guide, with every option explained. It is
-included in the DMG.
+included in the DMG and the zip.
 
 ## Loki setup
 
@@ -108,12 +108,13 @@ Notes:
 | `./build.sh --install` | Builds and installs for the current user |
 | `./build.sh --thumbnail` | Regenerates `Resources/thumbnail*.png` from a build |
 | `./make-dmg.sh` | Builds `dist/Matrix-<version>.dmg` with a styled Finder window (Finder may ask to be automated) |
+| `./make-dmg.sh --zip` | Also builds `dist/Matrix-<version>.zip`, for sites that don't accept DMGs |
 | `Tools/render-test.sh` | Renders the saver to a PNG without System Settings |
 
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.8' -c 'Set :CFBundleVersion 11' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.9' -c 'Set :CFBundleVersion 12' Info.plist
 ```
 
 ### Render test
@@ -158,9 +159,9 @@ Settings are stored with `ScreenSaverDefaults` in that process's sandbox contain
 ```
 MatrixView.swift            the screen saver
 Info.plist                  bundle info and version
-Instructions.txt            user guide (shipped in the DMG)
+Instructions.txt            user guide (shipped in the DMG and zip)
 build.sh                    build / install / thumbnails
-make-dmg.sh                 release DMG
+make-dmg.sh                 release DMG (and zip with --zip)
 make-thumbnail.swift        thumbnail generator
 make-dmg-background.swift   DMG window background
 Artwork/, Resources/        images
@@ -172,6 +173,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.9 | Fixes: log rotation that replaces the file is noticed; a big burst of lines no longer starts mid-line; Loki lines that arrive late are no longer missed |
 | 2.8 | A new error line is written across the screen, then melts into the rain |
 | 2.7 | Loki: services share the rain fairly, and quiet services' lines are fetched from further back |
 | 2.6 | Loki: the saver's start no longer rains Loki's own query-cancellation errors (or ripples for them) |

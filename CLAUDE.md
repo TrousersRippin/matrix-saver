@@ -15,7 +15,7 @@ session update **Status and history** and anything else that changed.
 | `Info.plist` | Bundle info. Version lives here (see Releasing) |
 | `Instructions.txt` | User docs, shipped in the DMG. Update it when options change |
 | `build.sh` | Builds `build/Matrix.saver`. `--install` also installs it; `--thumbnail` regenerates thumbnails |
-| `make-dmg.sh` | Builds and packages `dist/Matrix-<version>.dmg` (drives Finder to lay out the window) |
+| `make-dmg.sh` | Builds and packages `dist/Matrix-<version>.dmg` (drives Finder to lay out the window); `--zip` also makes `dist/Matrix-<version>.zip` |
 | `make-thumbnail.swift`, `make-dmg-background.swift`, `Artwork/`, `Resources/` | Thumbnail and DMG artwork |
 | `Tools/render-test.sh` | Renders the saver to a PNG without System Settings (see Testing) |
 | `dist/` | Release DMGs |
@@ -33,6 +33,7 @@ when Troy asks.
 ./build.sh             # build only (wipes build/)
 ./build.sh --install   # build, copy to ~/Library/Screen Savers, restart the saver host
 ./make-dmg.sh          # build + dist/Matrix-<CFBundleShortVersionString>.dmg
+./make-dmg.sh --zip    # also dist/Matrix-<version>.zip (folder with saver + Instructions.txt)
 Tools/render-test.sh   # render test, see below
 ```
 
@@ -54,9 +55,15 @@ Tools/render-test.sh   # render test, see below
   - `LogFeed`: one **shared** instance per process (`LogFeed.shared`), because System Settings
     makes several preview views and the saver has one view per display. `poll()` is called from
     the view's `step`, so nothing is polled while the saver isn't drawing.
-  - Files: reads the last 256 KB, then appended lines every 3 s, restarting on rotation.
+  - Files: reads the last 256 KB, then appended lines every 3 s (if >256 KB arrived, the last
+    256 KB from the first whole line, `read(midLine:)`). Rotation (inode changed, `fileID`, or
+    file shrank) reads the new file from its start as new lines and keeps the history. Lines
+    written to the old file after the last poll and before a rename are missed.
   - Loki: `query_range` over the last 24 h at start (backward, 2000), then forward from the
-    newest timestamp every 3 s (every 10 s while unreachable). The start fetch goes in up to 5
+    newest timestamp every 3 s (every 10 s while unreachable). Each poll starts
+    `lokiOverlap` (30 s) before the newest timestamp seen, so lines ingested late with older
+    timestamps are caught; entries already seen (`lokiSeenIDs`: hash of time, stream labels and
+    raw line) are skipped. The start fetch goes in up to 5
     rounds: services with ≥300 lines (else the top one) are excluded
     (`service_name!~"..."` inserted into the selector, `LogFeed.query(_:excluding:)`) and it
     reruns, so quiet services get lines from further back. Stops when a round returns <2000.
@@ -145,10 +152,13 @@ protection). To change the installed saver's settings, ask Troy to use Options.
 1. `/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString X.Y' -c 'Set :CFBundleVersion N' Info.plist`
    (bump the build number by one every release).
 2. Update the version and history in `readme.md` (and `Instructions.txt` if options changed).
-3. `./make-dmg.sh` (a Finder window opens and closes).
+3. `./make-dmg.sh --zip` (a Finder window opens and closes). The zip is made with
+   `ditto -c -k --norsrc --keepParent`: `ditto` keeps the bundle exact so the signature verifies;
+   `--norsrc` drops this Mac's xattrs (`com.apple.provenance`/`macl`), which became `._` files.
 4. Check: `hdiutil verify`, mount read-only, version in the mounted `Info.plist`, binary matches
-   `build/`, `codesign -v`. Then `./build.sh --install`.
-5. When Troy asks: commit, push, then `gh release create vX.Y dist/Matrix-X.Y.dmg --target main
+   `build/`, `codesign -v`; unzip the zip (`ditto -x -k`) and `codesign -v` it too. Then
+   `./build.sh --install`.
+5. When Troy asks: commit, push, then `gh release create vX.Y dist/Matrix-X.Y.dmg dist/Matrix-X.Y.zip --target main
    --title "Matrix X.Y" --notes-file <notes>` (`--target` needs a branch or full SHA, not a short
    one).
 
@@ -217,8 +227,26 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   white on red rain) even with level colours off, so ink glyphs are rendered whenever the banner
   is on. Tested with a scratch harness (append an error to a file mid-run, frames every 0.5 s):
   typed, readable, melted, gone after ~7 s.
+- **2.9** (2026-11-15, was 3.12): three log fixes. (1) More than 256 KB appended between polls no
+  longer starts mid-line. (2) Rotation is noticed when the path's inode changes, not only when
+  the file shrinks; the new file's lines show as new and the history is kept. (3) Loki polls
+  overlap 30 s and skip repeats, so late lines aren't missed. Tested with a scratch harness and
+  a fake Loki via `URLProtocol` (a local Python HTTP server couldn't be reached on this Mac, even
+  unsandboxed); 40 s live against the home Loki. Also `make-dmg.sh --zip` (2026-11-16):
+  releases are a DMG and a zip from then on.
 
-Ideas not done:
+Ideas not done (suggested 2026-11-15; Troy's picks were 1, 2 and the test script):
+- Fold repeated lines: unifi-siem kernel messages repeat every ~18 s and fill its 300-line
+  share; keep lines that differ only in numbers once.
+- Quiet-service alert: banner when Loki is unreachable or a usually steady service goes silent.
+- A shade of the rain colour per service.
+- Shorter banners: drop `level=error` etc. from banner text.
+- Stats under the clock: errors in the last hour, lines per minute.
+- `Tools/feed-test.sh`: keep the 2.7-2.9 scratch harnesses (fair share counts, banner frames,
+  file rotation, fake Loki via URLProtocol) as a permanent test.
+- Errors/warnings only; dim the start-fetch backlog; Grafana/Alertmanager alerts; Loki
+  `/tail` WebSocket instead of polling; lighter rain on battery; services per display.
+- Missed: lines written to a log between the last poll and a rename (would need the file kept open).
 - Loki basic auth / API token (would be stored in plain text in prefs).
 - Optional "colour the whole line" for keywords.
 - The default `install.log` produces lots of red from "Failed to..." lines; Troy may trim

@@ -276,6 +276,9 @@ private final class LogFeed {
 
     enum Level: UInt16 { case normal = 0, error, warn, debug }
     static let lokiHistory: Double = 24 * 3600  // seconds fetched at start
+    // A line can reach Loki after a newer one (agents batch and retry), so each poll asks again
+    // for this much before the newest timestamp seen, and skips the entries it already has.
+    static let lokiOverlap: UInt64 = 30_000_000_000  // nanoseconds
     // Loki logs every query it runs, with the query text. Every poll carries this tag and filters
     // it out, so those lines about the saver's own polls don't show up in the rain. Loki also runs
     // a stats lookup per query on the stream selector alone, which loses the tag; those lines are
@@ -303,7 +306,10 @@ private final class LogFeed {
     private var lastPoll: CFTimeInterval = 0
 
     private var offset: UInt64 = 0       // file: position read up to (always just after a newline)
+    private var fileID: UInt64?          // file: its inode, to notice a new file at the path
     private var lokiSince: UInt64 = 0    // loki: newest timestamp received, in nanoseconds
+    private var lokiSeen: [(ts: UInt64, id: Int)] = []  // loki: entries in the overlap, oldest first
+    private var lokiSeenIDs: Set<Int> = []
     private var lokiBusy = false         // loki: a request is in flight
     private var lokiOK = false           // loki: has answered at least once
 
@@ -470,11 +476,20 @@ private final class LogFeed {
     // MARK: File
 
     /// A file that shrank was rotated: start over.
+    /// Reads lines added since the last poll. If more than `tailBytes` arrived, only the last
+    /// `tailBytes` are read, from the first line that starts in them.
+    /// A rotated log, either a new file at the path (rename-and-create) or the same file cut short
+    /// (copy-and-truncate), is read from its start, its lines shown as new; the history is kept.
+    /// Lines written to the old file after the last poll and before a rename are missed.
     private func pollFile(_ path: String) {
-        guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 else { return }
-        if size < offset { loadFile(path); return }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else { return }
+        let id = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value
+        if size < offset || (fileID != nil && id != fileID) { offset = 0 }
+        fileID = id
         guard size > offset else { return }
-        append(read(path, from: max(offset, size > Self.tailBytes ? size - Self.tailBytes : 0)).map { ("", $0) })
+        let start = max(offset, size > Self.tailBytes ? size - Self.tailBytes : 0)
+        append(read(path, from: start, midLine: start > offset).map { ("", $0) })
     }
 
     private func loadFile(_ path: String) {
@@ -482,12 +497,14 @@ private final class LogFeed {
         fresh = []
         offset = 0
         lastPoll = CACurrentMediaTime()
-        guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 else {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else {
             setStatus("CANNOT READ \(path)")
             return
         }
+        fileID = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value
         let start = size > Self.tailBytes ? size - Self.tailBytes : 0
-        store(read(path, from: start, skipFirst: start > 0), in: "", replace: true)
+        store(read(path, from: start, midLine: start > 0), in: "", replace: true)
         if lineCount == 0 {
             let readable = FileHandle(forReadingAtPath: path).map { try? $0.close(); return true } ?? false
             setStatus(readable ? "\(path) IS EMPTY" : "CANNOT READ \(path)")
@@ -495,14 +512,21 @@ private final class LogFeed {
     }
 
     /// Reads from `start` to the end of the file, advancing `offset` past the last complete line.
-    private func read(_ path: String, from start: UInt64, skipFirst: Bool = false) -> [[UInt16]] {
+    /// With `midLine`, `start` may fall inside a line: reading begins at the first line that starts
+    /// at or after it (one byte earlier is read to tell whether `start` begins a line).
+    private func read(_ path: String, from start: UInt64, midLine: Bool = false) -> [[UInt16]] {
         guard let h = FileHandle(forReadingAtPath: path) else { return [] }
         defer { try? h.close() }
-        guard (try? h.seek(toOffset: start)) != nil, let data = try? h.readToEnd(), !data.isEmpty else { return [] }
+        let from = midLine && start > 0 ? start - 1 : start
+        guard (try? h.seek(toOffset: from)) != nil, let all = try? h.readToEnd(), !all.isEmpty else { return [] }
+        var data = all[...]
+        if from < start {
+            guard let first = data.firstIndex(of: 0x0A) else { return [] }  // no line starts here yet
+            data = data[(first + 1)...]
+        }
         guard let lastNewline = data.lastIndex(of: 0x0A) else { return [] }
-        offset = start + UInt64(lastNewline - data.startIndex + 1)
-        var lines = data[data.startIndex...lastNewline].split(separator: 0x0A)
-        if skipFirst, !lines.isEmpty { lines.removeFirst() }  // probably started mid-line
+        offset = from + UInt64(lastNewline - all.startIndex + 1)
+        let lines = data[data.startIndex...lastNewline].split(separator: 0x0A)
         return lines.map { raw in
             let line = Self.stripTimestamp(Self.stripANSI(String(decoding: raw, as: UTF8.self)))
             return self.encode(line, level: Self.level(of: line))
@@ -513,7 +537,8 @@ private final class LogFeed {
 
     /// Loki entry: `key` is the source it is kept under (service_name, else the shown name), and
     /// `service` the service_name label, if it has one (only those can be left out of a query).
-    private typealias LokiEntry = (ts: UInt64, line: String, level: Level, key: String, service: String?)
+    /// `id` identifies the entry (time, stream and text), to skip it when a poll returns it again.
+    private typealias LokiEntry = (ts: UInt64, line: String, level: Level, key: String, service: String?, id: Int)
 
     /// Fetches newer lines, or at start (`round` set, or no answer yet) the last day's.
     private func fetchLoki(round: Int = 0, excluding: [String] = [], asOf: UInt64? = nil) {
@@ -529,7 +554,7 @@ private final class LogFeed {
         let now = asOf ?? UInt64(Date().timeIntervalSince1970 * 1e9)
         c.queryItems = [
             URLQueryItem(name: "query", value: Self.query(query, excluding: excluding) + Self.lokiFilters),
-            URLQueryItem(name: "start", value: String(initial ? now - UInt64(Self.lokiHistory * 1e9) : lokiSince + 1)),
+            URLQueryItem(name: "start", value: String(initial ? now - UInt64(Self.lokiHistory * 1e9) : lokiSince - min(lokiSince, Self.lokiOverlap))),
             URLQueryItem(name: "end", value: String(now)),
             // At start, the most recent lines; after that, everything newer, oldest first.
             URLQueryItem(name: "limit", value: initial ? String(Self.lokiStartLimit) : "500"),
@@ -557,11 +582,16 @@ private final class LogFeed {
                     let name = labels["container_name"] ?? labels["service_name"] ?? labels["job"] ?? ""
                     let service = labels["service_name"]
                     let labelLevel = LogFeed.level(labels: labels)
+                    let streamID = labels.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
                     for v in stream["values"] as? [[String]] ?? [] where v.count >= 2 {
                         guard let ts = UInt64(v[0]) else { continue }
                         let line = LogFeed.tidy(v[1])
+                        var id = Hasher()
+                        id.combine(ts)
+                        id.combine(streamID)
+                        id.combine(v[1])
                         entries.append((ts, name.isEmpty ? line : "\(name): \(line)", labelLevel ?? LogFeed.level(of: line),
-                                        service ?? name, service))
+                                        service ?? name, service, id.finalize()))
                     }
                 }
                 entries.sort { $0.ts < $1.ts }
@@ -588,7 +618,25 @@ private final class LogFeed {
             if !lokiOK { setStatus("CANNOT REACH \(base): \(failure)") }
             return  // keep showing what we have, and retry
         }
-        if round == 0 { lokiSince = max(lokiSince, entries.last?.ts ?? now) }
+        // The newest time in the reply, even if every entry in it is a repeat (a full reply of
+        // repeats still moves on).
+        let newest = entries.last?.ts ?? now
+        var entries = entries
+        if !initial {
+            entries.removeAll { lokiSeenIDs.contains($0.id) }  // already had these (the overlap)
+        }
+        if round == 0 {
+            lokiSince = max(lokiSince, newest)
+            // Remember what falls in the next poll's overlap.
+            let cutoff = lokiSince - min(lokiSince, Self.lokiOverlap)
+            for e in entries where e.ts >= cutoff {
+                lokiSeen.append((e.ts, e.id))
+                lokiSeenIDs.insert(e.id)
+            }
+            let old = lokiSeen.prefix { $0.ts < cutoff }
+            for e in old { lokiSeenIDs.remove(e.id) }
+            lokiSeen.removeFirst(old.count)
+        }
         let lines = entries.compactMap { e -> (key: String, text: [UInt16])? in
             let text = encode(e.line, level: e.level)
             return text.isEmpty ? nil : (e.key, text)
