@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.11**.
+- Current version: **2.12**.
 
 ## Features
 
@@ -47,7 +47,8 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
   the log goes quiet (down to half), so a burst of activity shows as a downpour.
 - **Error ripple:** a new error line sends a ring spreading across the rain from where it starts.
 - **Error banner:** a new error line is typed out in red across the screen so you can read it,
-  held for a few seconds, then melts back into the rain.
+  held for a few seconds, then melts back into the rain. The banner is shortened: the level
+  (`level=error`, `ERR`, `[error]`), process ids and noise fields go, and the message comes first.
 - **Quiet alert** (Loki): a banner when Loki can't be reached, or when a service that logs
   steadily stops for 15 minutes (longer if it sometimes pauses), and again when it's back.
 - Lines are tidied for the rain: terminal colour codes, timestamps and repeated host names are removed, JSON logs become
@@ -119,7 +120,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.11' -c 'Set :CFBundleVersion 14' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.12' -c 'Set :CFBundleVersion 15' Info.plist
 ```
 
 ### Render test
@@ -186,6 +187,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.12 | Error banners are shorter: the level, process ids and noise fields go, and the message comes first |
 | 2.11 | Loki: a banner when Loki can't be reached or a steady service goes quiet, and when it's back |
 | 2.10 | Lines that differ only in numbers are kept once, so repeated messages don't crowd out the rest |
 | 2.9 | Fixes: log rotation that replaces the file is noticed; a big burst of lines no longer starts mid-line; Loki lines that arrive late are no longer missed |

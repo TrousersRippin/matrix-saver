@@ -84,6 +84,13 @@ Tools/feed-test.sh     # log feed tests (97 checks, ~1 min with compile); FILTER
     of the whole line, then `cut()` to `maxLineLength` (200) in `store`/`append`; otherwise
     numbers of different widths moved the cut and long repeats didn't match. New lines still all
     rain (`fresh` isn't folded). Live: unifi-siem 300 kept lines → ~23, grafana 300 → ~39.
+  - **Banner text** (`LogFeed.bannerText`, error banners only, not alerts or the rain): keeps
+    Loki's "name: " prefix, then `shorten()`: glog header off; `host prog[pid]:` → `prog:`; noise
+    fields off (`level`, `lvl`, `severity`, `logger`, `component`, `user`, `userId`, `orgId`,
+    `uname`, `t`, `fp`, `middleware`); a first level word off only if it is a marker (closed
+    bracket, colon, capitals, or lower case before a capital as tidied JSON gives, so "Error
+    handling request" stays; `<error code=...>` stays); then `msg="..."` first, unquoted. A line
+    that would be empty is kept whole. Re-encoded, so keywords and level stay.
   - **Quiet alerts** (`Settings.quietAlerts`, Logs tab "Warn when logging goes quiet", default
     on, Loki only): `LogFeed.alerts` (id, time, text with its level in the glyph bits), shown by
     `stepBanner` before errors (alerts wait for a free banner, dropped after 2 min; each view keeps
@@ -274,11 +281,15 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   grace blocks quiet alerts; live metric query (29 services, 7 steady, none quiet). Also
   **`Tools/feed-test.sh`**, the permanent log feed test (see Testing). Banner frames aren't in
   it (they're view-level: use render-test).
+- **2.12** (2026-11-17, was 3.15): **shorter error banners** (see Banner text). Checked on 40
+  distinct real error lines from the home Loki (grafana 367 → 268 chars, loki 117 → 81,
+  dns-cache-db 110 → 86); 24 feed-test checks added; a render shows a one-row banner. Note for
+  banner renders: start the background append after the test binary is built
+  (`build/render-test`), or it lands while compiling and isn't new.
 
 Ideas not done (suggested 2026-11-15; Troy's picks, fold repeats, quiet-service alert
 and the test script, are all done):
 - A shade of the rain colour per service.
-- Shorter banners: drop `level=error` etc. from banner text.
 - Stats under the clock: errors in the last hour, lines per minute.
 - Errors/warnings only; dim the start-fetch backlog; Grafana/Alertmanager alerts; Loki
   `/tail` WebSocket instead of polling; lighter rain on battery; services per display.

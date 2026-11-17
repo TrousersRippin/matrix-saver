@@ -959,6 +959,78 @@ private final class LogFeed {
         return replace(repeatedWord, in: line, with: "$1")
     }
 
+    // MARK: Banner text
+
+    // A glog header: "E1114 10:00:00.123456    1234 server.go:12] ".
+    private static let glogHeader = try! NSRegularExpression(pattern: #"^[EWIF]\d{4} [\d:.]+\s+(\d+\s+)?\S+\] "#)
+    // "host prog[1234]:" or "prog[1234]:" at the start.
+    private static let program = try! NSRegularExpression(pattern: #"^(?:\S+ )?([A-Za-z0-9_./-]+)\[\d+\]:\s*"#)
+    // Fields with nothing to say in a banner: the level (the banner's colour shows it) and labels.
+    private static let bannerNoise = try! NSRegularExpression(pattern:
+        #"(?i)(^|\s)(level|lvl|severity|loglevel|logger|component|user|userid|orgid|uname|t|fp|middleware)=("[^"]*"|\S+)"#)
+    // logfmt's message: msg="..." or msg=word.
+    private static let bannerMessage = try! NSRegularExpression(pattern: #"(^|\s)(?:msg|message)=(?:"((?:[^"\\]|\\.)*)"|(\S+))"#)
+    // A level word first: "ERR", "ERROR:", "ERROR:x", "[error]", "<warn>", "E:" (apt), "- ERROR ::".
+    // Groups: opening bracket, word, closing bracket, colon.
+    private static let leadingLevel = try! NSRegularExpression(pattern:
+        #"^(?:-\s+)?([\[<(]?)([A-Za-z]{1,9})(?![A-Za-z])([\]>)]?)(\s*::?)?\s*"#)
+
+    static func string(_ glyphs: [UInt16]) -> String {
+        String(String.UnicodeScalarView(glyphs.compactMap { Unicode.Scalar(UInt32($0 & glyphBits) + 0x20) }))
+    }
+
+    /// A shorter error line for the banner, which has three rows of 72 columns: the level goes (the
+    /// banner is red; a first level word only if it is a marker, see shorten), "host prog[pid]:" becomes "prog:", noise fields go, and logfmt's msg="..."
+    /// comes first. Loki's "service: " prefix is kept. The rain keeps the whole line.
+    func bannerText(_ glyphs: [UInt16]) -> [UInt16] {
+        var line = Self.string(glyphs)
+        var name = ""
+        if case .loki = source, let r = line.range(of: ": ") {
+            name = String(line[..<r.upperBound])
+            line = String(line[r.upperBound...])
+        }
+        return Self.cut(encode(name + Self.shorten(line), level: Self.level(of: glyphs)))
+    }
+
+    static func shorten(_ text: String) -> String {
+        var line = replace(glogHeader, in: text, with: "")
+        var prog = ""
+        let ns = line as NSString
+        if let m = program.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) {
+            prog = ns.substring(with: m.range(at: 1)) + ": "
+            line = ns.substring(from: m.range.upperBound)
+        }
+        line = replace(bannerNoise, in: line, with: "").trimmingCharacters(in: .whitespaces)
+        // The level word goes before the message moves first, as the message may start with "error".
+        let lns = line as NSString
+        if let m = leadingLevel.firstMatch(in: line, range: NSRange(location: 0, length: lns.length)) {
+            // Only a marker: in a closed bracket, before a colon, in capitals, or (as JSON lines are
+            // tidied: "error Access denied") lower case before a capital. "Error handling request" stays.
+            func group(_ i: Int) -> String { m.range(at: i).location == NSNotFound ? "" : lns.substring(with: m.range(at: i)) }
+            let open = group(1), word = group(2), close = group(3), colon = group(4).contains(":")
+            let pairs = ["": "", "[": "]", "<": ">", "(": ")"]
+            let rest = lns.substring(from: m.range.upperBound)
+            let marked = colon || !open.isEmpty
+                || word.count >= 3 && word == word.uppercased()
+                || word == word.lowercased() && rest.first?.isUppercase == true
+            if pairs[open] == close, !rest.isEmpty,
+               word.count == 1 ? colon && "EWF".contains(word) : marked && level(word: word) != nil {
+                line = rest
+            }
+        }
+        let mns = line as NSString
+        if let m = bannerMessage.firstMatch(in: line, range: NSRange(location: 0, length: mns.length)) {
+            let quoted = m.range(at: 2), bare = m.range(at: 3)
+            let message = quoted.location != NSNotFound
+                ? mns.substring(with: quoted).replacingOccurrences(of: #"\""#, with: "\"")
+                : mns.substring(with: bare)
+            let rest = mns.replacingCharacters(in: m.range, with: "").trimmingCharacters(in: .whitespaces)
+            line = rest.isEmpty ? message : message + " " + rest
+        }
+        line = line.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
+        return line.isEmpty ? text : prog + line
+    }
+
     // MARK: Log levels
 
     // Terminal colour codes, as in "[\u{1B}[32minfo\u{1B}[39m]": the escape has no glyph and the rest
@@ -1626,7 +1698,7 @@ final class MatrixView: ScreenSaverView {
                 alertShown = a.id
                 startBanner(a.text, front)
             } else if settings.errorBanner, let text = layers.lazy.flatMap({ $0.newErrors }).first?.text {
-                startBanner(text, front)
+                startBanner(logFeed?.bannerText(text) ?? text, front)
             }
         }
         guard var b = banner else { return }

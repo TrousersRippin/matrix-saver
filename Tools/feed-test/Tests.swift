@@ -51,6 +51,7 @@ func runFeedTests(scratch: String) -> Bool {
         ("levels", LogFeed.testLevels),
         ("keywords", LogFeed.testKeywords),
         ("shape", LogFeed.testShape),
+        ("banner", LogFeed.testBanner),
         ("fair share", LogFeed.testFairShare),
         ("volume", LogFeed.testVolume),
         ("file", { LogFeed.testFile(scratch) }),
@@ -201,6 +202,52 @@ extension LogFeed {
         f.store([f.encode("other line", level: .normal), f.encode("SRC=5.5.5.5 " + pad + "LEN=3", level: .normal)], in: "k")
         expectEqual(f.lines("k").count, 2, "a repeat replaces the older line")
         check(f.lines("k").last?.hasPrefix("SRC=5.5.5.5") == true, "and moves to the newest end")
+    }
+
+    // MARK: Banner
+
+    static func testBanner() {
+        // Raw lines as Loki or a file gives them, tidied as the feed does, then shortened.
+        let cases: [(String, String)] = [
+            (#"logger=context userId=1 orgId=1 uname=troy t=2026-11-17T13:20:41.1+01:00 level=error msg="Request Completed" method=GET path=/api/x status=501"#,
+             "Request Completed method=GET path=/api/x status=501"),
+            (#"level=error ts=2026-11-17T14:53:01Z caller=scheduler_processor.go:176 component=querier org_id=fake msg="error notifying scheduler" err=EOF"#,
+             "error notifying scheduler err=EOF"),
+            (#"ts=2026-11-17T13:29:43Z caller=spanlogger.go:152 user=fake level=error msg="failed downloading chunks" err="context canceled""#,
+             #"failed downloading chunks err="context canceled""#),
+            ("\u{1B}[2mNov 17 14:01:01.043\u{1B}[0m \u{1B}[91mERR\u{1B}[0m analytics heartbeat failed; retrying",
+             "analytics heartbeat failed; retrying"),
+            ("Nov 17 14:56:46 UCG-Fiber UCG-Fiber dns-cache-db[2900]: [error] Failed to open file: /run/x.cache",
+             "dns-cache-db: Failed to open file: /run/x.cache"),
+            ("Nov 17 11:43:12 UCG-Fiber apt-helper[3741273]: E: Sub-process returned an error code (1)",
+             "apt-helper: Sub-process returned an error code (1)"),
+            ("ERROR:  relation \"users\" does not exist", #"relation "users" does not exist"#),
+            (#"{"level":"error","msg":"boom","code":7}"#, "error boom code=7"),  // lower case before lower case: a word
+            (#"{"level":"error","msg":"Access denied"}"#, "Access denied"),  // lower case before a capital
+            ("ERROR:Failed to get interface", "Failed to get interface"),
+            ("- ERROR :: Thread-22 (run) : WebSocket :: Connection refused.", "Thread-22 (run) : WebSocket :: Connection refused."),
+            (#"<error code="410" description="Indexer is disabled" />"#, #"<error code="410" description="Indexer is disabled" />"#),
+            ("[Error] CommandExecutor: Error occurred", "CommandExecutor: Error occurred"),
+            (#"msg="said \"no\" twice" level=error"#, #"said "no" twice"#),
+            ("E1114 10:00:00.123456    1234 server.go:12] connection refused", "connection refused"),
+            ("openvpn[3306]: TLS Error: cannot locate HMAC", "openvpn: TLS Error: cannot locate HMAC"),
+            ("[WARN] slow disk", "slow disk"),
+            ("<error> bad input", "bad input"),
+            ("Error handling request", "Error handling request"),  // a word, not a marker
+        ]
+        for (raw, want) in cases { expectEqual(shorten(tidy(raw)), want, "banner: \(want)") }
+        expectEqual(shorten("level=error"), "level=error", "a line that would be empty is kept")
+
+        FakeLoki.handler = { _ in (500, ["error": "down"]) }
+        let f = LogFeed(source: .loki(url: "http://fake-loki.test", query: "{job=\"x\"}"), keywords: ["fail"], levels: true)
+        let line = f.encode(#"grafana: level=error msg="Failed to save" uid=abc"#, level: .error)
+        let b = f.bannerText(line)
+        expectEqual(text(b), "grafana: Failed to save uid=abc", "Loki's service prefix kept")
+        expectEqual(level(of: b), .error, "banner keeps the line's level")
+        check(b.indices.contains { b[$0] & keywordBit != 0 }, "banner keeps keywords")
+        let file = LogFeed(source: .file("/nonexistent/feed-test"), keywords: [], levels: true)
+        expectEqual(text(file.bannerText(file.encode("ERROR: disk full: /var", level: .error))), "disk full: /var",
+                    "file lines have no prefix to keep")
     }
 
     // MARK: Fair share
