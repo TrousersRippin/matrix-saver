@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.10**.
+- Current version: **2.11**.
 
 ## Features
 
@@ -48,6 +48,8 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 - **Error ripple:** a new error line sends a ring spreading across the rain from where it starts.
 - **Error banner:** a new error line is typed out in red across the screen so you can read it,
   held for a few seconds, then melts back into the rain.
+- **Quiet alert** (Loki): a banner when Loki can't be reached, or when a service that logs
+  steadily stops for 15 minutes (longer if it sometimes pauses), and again when it's back.
 - Lines are tidied for the rain: terminal colour codes, timestamps and repeated host names are removed, JSON logs become
   `level message key=value`, and logfmt noise (`ts=`, `caller=`, …) is dropped.
 
@@ -112,11 +114,12 @@ Notes:
 | `./make-dmg.sh` | Builds `dist/Matrix-<version>.dmg` with a styled Finder window (Finder may ask to be automated) |
 | `./make-dmg.sh --zip` | Also builds `dist/Matrix-<version>.zip`, for sites that don't accept DMGs |
 | `Tools/render-test.sh` | Renders the saver to a PNG without System Settings |
+| `Tools/feed-test.sh` | Tests the log feed (no network or Loki needed) |
 
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.10' -c 'Set :CFBundleVersion 13' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.11' -c 'Set :CFBundleVersion 14' Info.plist
 ```
 
 ### Render test
@@ -133,6 +136,13 @@ SOURCE=http://192.168.1.10:3100 MENU=1 Tools/render-test.sh   # click through th
 ```
 
 It runs outside the screen saver sandbox, so check sandbox behaviour in System Settings too.
+
+### Feed test
+
+`Tools/feed-test.sh` tests the log feed: line cleanup and levels, folding repeats, the fair share,
+volume, following a file through big appends and rotation, Loki fetches against a fake server, and
+quiet alerts. It needs no network, prints each check, and exits non-zero if one fails.
+`FILTER=loki Tools/feed-test.sh` runs only the groups whose name contains "loki".
 
 ## How it works
 
@@ -168,6 +178,7 @@ make-thumbnail.swift        thumbnail generator
 make-dmg-background.swift   DMG window background
 Artwork/, Resources/        images
 Tools/render-test.sh        render test (driver in Tools/render-test/)
+Tools/feed-test.sh          log feed tests (in Tools/feed-test/)
 CLAUDE.md                   working notes for Claude Code
 ```
 
@@ -175,6 +186,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.11 | Loki: a banner when Loki can't be reached or a steady service goes quiet, and when it's back |
 | 2.10 | Lines that differ only in numbers are kept once, so repeated messages don't crowd out the rest |
 | 2.9 | Fixes: log rotation that replaces the file is noticed; a big burst of lines no longer starts mid-line; Loki lines that arrive late are no longer missed |
 | 2.8 | A new error line is written across the screen, then melts into the rain |

@@ -61,6 +61,7 @@ private struct Settings: Equatable {
     var followVolume = true // log mode: more rain while logs are busy, less while quiet
     var errorRipple = true  // log mode: a ripple spreads from each new error line
     var errorBanner = true  // log mode: each new error line is written across the screen
+    var quietAlerts = true  // log mode (Loki): a banner when Loki or a steady service goes quiet
     var logSource = 0   // 0: a file, 1: a Loki server
     var lokiURL = ""
     var lokiQuery = Settings.defaultLokiQuery
@@ -86,7 +87,7 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "errorBanner": base.errorBanner, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "errorBanner": base.errorBanner, "quietAlerts": base.quietAlerts, "logSource": base.logSource, "lokiURL": base.lokiURL,
                               "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
                               "mainDisplayOnly": base.mainDisplayOnly, "clock": base.clock, "intro": base.intro,
@@ -106,6 +107,7 @@ private struct Settings: Equatable {
         s.followVolume = d.bool(forKey: "followVolume")
         s.errorRipple = d.bool(forKey: "errorRipple")
         s.errorBanner = d.bool(forKey: "errorBanner")
+        s.quietAlerts = d.bool(forKey: "quietAlerts")
         s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
         s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
         s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
@@ -146,6 +148,7 @@ private struct Settings: Equatable {
         d.set(followVolume, forKey: "followVolume")
         d.set(errorRipple, forKey: "errorRipple")
         d.set(errorBanner, forKey: "errorBanner")
+        d.set(quietAlerts, forKey: "quietAlerts")
         d.set(logSource, forKey: "logSource")
         d.set(lokiURL, forKey: "lokiURL")
         d.set(lokiQuery, forKey: "lokiQuery")
@@ -314,6 +317,18 @@ private final class LogFeed {
     private var lokiSeenIDs: Set<Int> = []
     private var lokiBusy = false         // loki: a request is in flight
     private var lokiOK = false           // loki: has answered at least once
+    private var lokiDownSince: CFTimeInterval?  // loki: failing since (after it had answered)
+    private var lokiDownAlerted = false
+
+    /// Banners for the views to show (see Alert), newest last.
+    private(set) var alerts: [Alert] = []
+    private var alertCount = 0
+    /// Set by the views from Options: watch for quiet services (it costs a query every 2 minutes).
+    var watchQuiet = false
+    private var lastQuietCheck: CFTimeInterval = 0
+    private var quietBusy = false
+    private var quietGrace: CFTimeInterval = 0  // no new quiet alerts before this (Loki catching up)
+    private var quiet: [String: Double] = [:]   // services reported quiet: their last active time
 
     private let started = CACurrentMediaTime()
     private var arrivals: [(t: CFTimeInterval, n: Int)] = []  // new lines in the last volumeWindow
@@ -508,6 +523,10 @@ private final class LogFeed {
             lastPoll = now
             pollFile(path)
         case .loki:
+            if watchQuiet, lokiOK, lokiDownSince == nil, !quietBusy, now - lastQuietCheck >= Self.quietCheckGap {
+                lastQuietCheck = now
+                checkQuiet()
+            }
             guard !lokiBusy, now - lastPoll > (lokiOK ? 3 : 10) else { return }
             lastPoll = now
             fetchLoki()
@@ -527,7 +546,122 @@ private final class LogFeed {
         fresh = Array((fresh + lines.map { Self.cut($0.text) }).suffix(200))
         arrivals.append((CACurrentMediaTime(), lines.count))
         if baseline == nil { seedCount += lines.count }
+        for key in Set(lines.map(\.key)) where quiet[key] != nil { serviceBack(key) }
         for (key, group) in Dictionary(grouping: lines, by: \.key) { store(group.map(\.text), in: key) }
+    }
+
+    // MARK: Alerts
+
+    /// A banner for the views: Loki can't be reached or is back, or a steady service has gone quiet
+    /// or is logging again. The level gives the colour (error red, warn amber, normal the rain's).
+    /// The feed is shared, so each view keeps the id of the last one it showed.
+    struct Alert {
+        let id: Int
+        let time: CFTimeInterval
+        let text: [UInt16]
+    }
+
+    static let lokiDownAfter: CFTimeInterval = 30      // failing this long before it's reported
+    static let quietCheckGap: CFTimeInterval = 120     // between quiet checks
+    static let quietGraceTime: CFTimeInterval = 300    // after Loki comes back
+    static let quietBucket: Double = 300               // seconds per count
+    static let quietHistory: Double = 6 * 3600         // judged steady over this, before it went quiet
+    static let quietSteady = 0.85                      // of the buckets with lines, at least
+    static let quietMinimum: Double = 15 * 60          // silence reported after at least this
+
+    private func alert(_ text: String, level: Level) {
+        Self.log.notice("alert: \(text, privacy: .public)")
+        alertCount += 1
+        alerts.append(Alert(id: alertCount, time: CACurrentMediaTime(), text: Self.cut(encode(text, level: level))))
+        if alerts.count > 8 { alerts.removeFirst() }
+    }
+
+    /// "40 s", "18 min", "2 h 5 min".
+    static func duration(_ seconds: Double) -> String {
+        let s = Int(seconds.rounded())
+        if s < 60 { return "\(s) s" }
+        let m = s / 60
+        if m < 60 { return "\(m) min" }
+        return m % 60 == 0 ? "\(m / 60) h" : "\(m / 60) h \(m % 60) min"
+    }
+
+    private func serviceBack(_ service: String) {
+        guard let last = quiet.removeValue(forKey: service) else { return }
+        alert("\(service) is logging again after \(Self.duration(Date().timeIntervalSince1970 - last))", level: .normal)
+    }
+
+    /// Asks Loki how many lines each service of the query logged per 5 minutes over the last 12
+    /// hours, and reports services that were steady and have gone quiet (see evaluateQuiet).
+    private func checkQuiet() {
+        guard case let .loki(base, query) = source else { return }
+        var root = base
+        while root.hasSuffix("/") { root.removeLast() }
+        guard var c = URLComponents(string: root + "/loki/api/v1/query_range") else { return }
+        let now = Date().timeIntervalSince1970
+        let step = Int(Self.quietBucket)
+        let metric = "sum by (service_name) (count_over_time(\(query)\(Self.lokiFilters) [\(step)s]))"
+        c.queryItems = [
+            URLQueryItem(name: "query", value: metric),
+            URLQueryItem(name: "start", value: String(Int(now - 2 * Self.quietHistory))),
+            URLQueryItem(name: "end", value: String(Int(now))),
+            URLQueryItem(name: "step", value: String(step)),
+        ]
+        c.percentEncodedQuery = c.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let url = c.url else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        quietBusy = true
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            var counts: [String: [(t: Double, n: Double)]]?
+            if error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let body = json["data"] as? [String: Any], let result = body["result"] as? [[String: Any]] {
+                var c: [String: [(t: Double, n: Double)]] = [:]
+                for series in result {
+                    guard let name = (series["metric"] as? [String: String])?["service_name"], !name.isEmpty else { continue }
+                    for v in series["values"] as? [[Any]] ?? [] where v.count >= 2 {
+                        guard let t = v[0] as? Double, let n = Double(v[1] as? String ?? "") else { continue }
+                        c[name, default: []].append((t, n))
+                    }
+                }
+                counts = c
+            } else {
+                let why = error?.localizedDescription ?? "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)"
+                Self.log.error("quiet check: \(why, privacy: .public)")
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.quietBusy = false
+                if let counts { self.evaluateQuiet(counts, now: now) }
+            }
+        }.resume()
+    }
+
+    /// A service is steady if it logged in at least 85% of the 5-minute buckets of the 6 hours
+    /// before its last line. It is reported quiet once it has logged nothing for 15 minutes, or
+    /// twice its longest gap in those 6 hours if that is longer (so a service that sometimes
+    /// skips a bucket isn't reported for skipping two). It is reported again when lines arrive.
+    /// A silence older than 6 hours is no longer judged (that service isn't steady any more).
+    func evaluateQuiet(_ counts: [String: [(t: Double, n: Double)]], now: Double) {
+        let grace = CACurrentMediaTime() < quietGrace
+        for (service, points) in counts {
+            let active = points.filter { $0.n > 0 }.map(\.t).sorted()
+            guard let last = active.last else { continue }
+            if let was = quiet[service] {
+                if last > was { serviceBack(service) }
+                continue
+            }
+            let silence = now - last
+            guard !grace, silence >= Self.quietMinimum, silence <= Self.quietHistory else { continue }
+            let window = active.filter { $0 > last - Self.quietHistory }
+            let buckets = Self.quietHistory / Self.quietBucket
+            guard Double(window.count) >= buckets * Self.quietSteady else { continue }
+            var longest = Self.quietBucket
+            for (a, b) in zip(window, window.dropFirst()) { longest = max(longest, b - a) }
+            guard silence >= max(Self.quietMinimum, 2 * longest) else { continue }
+            quiet[service] = last
+            alert("\(service) has gone quiet: no lines for \(Self.duration(silence))", level: .warn)
+        }
     }
 
     // MARK: Volume
@@ -702,10 +836,25 @@ private final class LogFeed {
     private func receive(_ entries: [LokiEntry], failure: String?, initial: Bool, round: Int,
                          excluding: [String], asOf now: UInt64, base: String, query: String) {
         lokiBusy = false
+        let clock = CACurrentMediaTime()
         if let failure {
             Self.log.error("loki \(base, privacy: .public): \(failure, privacy: .public)")
             if !lokiOK { setStatus("CANNOT REACH \(base): \(failure)") }
+            if lokiOK {
+                let since = lokiDownSince ?? clock
+                lokiDownSince = since
+                if !lokiDownAlerted, clock - since >= Self.lokiDownAfter {
+                    lokiDownAlerted = true
+                    alert("cannot reach Loki at \(base): \(failure)", level: .error)
+                }
+            }
             return  // keep showing what we have, and retry
+        }
+        if let since = lokiDownSince {
+            if lokiDownAlerted { alert("Loki is back after \(Self.duration(clock - since))", level: .normal) }
+            lokiDownSince = nil
+            lokiDownAlerted = false
+            quietGrace = clock + Self.quietGraceTime  // lines held back by the agents arrive late
         }
         // The newest time in the reply, even if every entry in it is a repeat (a full reply of
         // repeats still moves on).
@@ -1138,6 +1287,7 @@ final class MatrixView: ScreenSaverView {
 
     private var banner: Banner?
     private var lastBanner: CFTimeInterval = 0
+    private var alertShown = 0  // id of the feed's last alert this view showed (LogFeed.Alert)
     private var bannerBox: (c0: Int, c1: Int, r0: Int, r1: Int)?  // cleared behind the banner, until it melts
 
     private var nextGlitch: Float = 0
@@ -1262,7 +1412,7 @@ final class MatrixView: ScreenSaverView {
         }
         glyphScale = scale
         inkTint = nil
-        if logFeed != nil, !settings.keywordList.isEmpty || settings.levelColors || settings.errorBanner { renderInkGlyphs() }
+        if logFeed != nil, !settings.keywordList.isEmpty || settings.levelColors || settings.errorBanner || settings.quietAlerts { renderInkGlyphs() }
 
         // These all hold positions in the old grid.
         message = nil
@@ -1396,6 +1546,7 @@ final class MatrixView: ScreenSaverView {
 
         if settings.clock { updateClock(front) }
         if let logFeed {
+            logFeed.watchQuiet = settings.quietAlerts
             logFeed.poll()
             if settings.followVolume {
                 // Ease towards the feed's volume over a few seconds, so the rain swells and thins.
@@ -1462,17 +1613,25 @@ final class MatrixView: ScreenSaverView {
     // MARK: - Error banner
 
     static let bannerGap: CFTimeInterval = 10  // at least this long between banners
+    static let alertLife: CFTimeInterval = 120 // an alert not shown by then is dropped (a new view)
     static let bannerWidth = 72                // columns at most
     static let bannerLines = 3                 // rows at most; the rest is cut
 
     private func stepBanner(_ dt: Float, _ front: Layer) {
-        if settings.errorBanner, banner == nil, CACurrentMediaTime() - lastBanner >= Self.bannerGap,
-           let text = layers.lazy.flatMap({ $0.newErrors }).first?.text {
-            startBanner(text, front)
+        let now = CACurrentMediaTime()
+        if banner == nil, now - lastBanner >= Self.bannerGap {
+            // Alerts wait for their turn rather than being dropped; errors are only taken as they come.
+            if settings.quietAlerts, let feed = logFeed,
+               let a = feed.alerts.first(where: { $0.id > alertShown && now - $0.time < Self.alertLife }) {
+                alertShown = a.id
+                startBanner(a.text, front)
+            } else if settings.errorBanner, let text = layers.lazy.flatMap({ $0.newErrors }).first?.text {
+                startBanner(text, front)
+            }
         }
         guard var b = banner else { return }
         b.age += dt
-        if b.done || !settings.errorBanner {
+        if b.done || !(settings.errorBanner || settings.quietAlerts) {
             banner = nil
             bannerBox = nil
             return
@@ -1964,6 +2123,7 @@ private final class OptionsController: NSObject {
     private var volumeCheck: NSButton!
     private var rippleCheck: NSButton!
     private var bannerCheck: NSButton!
+    private var quietCheck: NSButton!
     private var logsNote: NSTextField!
 
     private override init() {
@@ -2038,7 +2198,7 @@ private final class OptionsController: NSObject {
             return f
         }
         func newPage() {
-            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 11))
+            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 12))
             content.addSubview(page)
             pages.append(page)
             parent = page
@@ -2133,10 +2293,11 @@ private final class OptionsController: NSObject {
         volumeCheck = checkbox("More rain when logs are busy", row: 7, x: controlX)
         rippleCheck = checkbox("Ripple when an error arrives", row: 8, x: controlX)
         bannerCheck = checkbox("Write new errors across the screen", row: 9, x: controlX)
+        quietCheck = checkbox("Warn when logging goes quiet", row: 10, x: controlX)
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 10 * rowH + 2, width: wideW, height: rowH * 1.5)
+        logsNote.frame = NSRect(x: controlX, y: 11 * rowH + 2, width: wideW, height: rowH * 1.5)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
@@ -2144,7 +2305,7 @@ private final class OptionsController: NSObject {
         originY = margin
 
         // Credit line. Bundle.main is the host process here, so look up the saver's own bundle.
-        let creditRow: CGFloat = 12.35
+        let creditRow: CGFloat = 13.35
         let version = Bundle(for: OptionsController.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let credit = NSTextField(labelWithString: "Version \(version) · Agent Smith")
         credit.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -2223,6 +2384,7 @@ private final class OptionsController: NSObject {
         volumeCheck.state = s.followVolume ? .on : .off
         rippleCheck.state = s.errorRipple ? .on : .off
         bannerCheck.state = s.errorBanner ? .on : .off
+        quietCheck.state = s.quietAlerts ? .on : .off
         controlsChanged()
     }
 
@@ -2256,6 +2418,7 @@ private final class OptionsController: NSObject {
         volumeCheck.isEnabled = logs
         rippleCheck.isEnabled = logs
         bannerCheck.isEnabled = logs
+        quietCheck.isEnabled = logs && loki
         logsNote.stringValue = logs
             ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
                     : "Shows the end of the file, then new lines as they are written.")
@@ -2411,6 +2574,7 @@ private final class OptionsController: NSObject {
         s.followVolume = volumeCheck.state == .on
         s.errorRipple = rippleCheck.state == .on
         s.errorBanner = bannerCheck.state == .on
+        s.quietAlerts = quietCheck.state == .on
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)

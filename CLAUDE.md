@@ -18,6 +18,7 @@ session update **Status and history** and anything else that changed.
 | `make-dmg.sh` | Builds and packages `dist/Matrix-<version>.dmg` (drives Finder to lay out the window); `--zip` also makes `dist/Matrix-<version>.zip` |
 | `make-thumbnail.swift`, `make-dmg-background.swift`, `Artwork/`, `Resources/` | Thumbnail and DMG artwork |
 | `Tools/render-test.sh` | Renders the saver to a PNG without System Settings (see Testing) |
+| `Tools/feed-test.sh`, `Tools/feed-test/` | Log feed tests, no network needed (see Testing) |
 | `dist/` | Release DMGs |
 | `readme.md` | GitHub readme: features, install, Loki setup, building, version history. Update it with each release |
 
@@ -35,6 +36,7 @@ when Troy asks.
 ./make-dmg.sh          # build + dist/Matrix-<CFBundleShortVersionString>.dmg
 ./make-dmg.sh --zip    # also dist/Matrix-<version>.zip (folder with saver + Instructions.txt)
 Tools/render-test.sh   # render test, see below
+Tools/feed-test.sh     # log feed tests (97 checks, ~1 min with compile); FILTER=<group> for some
 ```
 
 ## How it works
@@ -82,6 +84,16 @@ Tools/render-test.sh   # render test, see below
     of the whole line, then `cut()` to `maxLineLength` (200) in `store`/`append`; otherwise
     numbers of different widths moved the cut and long repeats didn't match. New lines still all
     rain (`fresh` isn't folded). Live: unifi-siem 300 kept lines → ~23, grafana 300 → ~39.
+  - **Quiet alerts** (`Settings.quietAlerts`, Logs tab "Warn when logging goes quiet", default
+    on, Loki only): `LogFeed.alerts` (id, time, text with its level in the glyph bits), shown by
+    `stepBanner` before errors (alerts wait for a free banner, dropped after 2 min; each view keeps
+    `alertShown` because the feed is shared). Loki unreachable ≥30 s after it had answered → red;
+    back → plain, and 5 min grace for quiet alerts. Every 2 min (`watchQuiet`, set by the view)
+    `checkQuiet` runs `sum by (service_name) (count_over_time(<query><filters> [300s]))` over
+    12 h, step 300; `evaluateQuiet`: steady = lines in ≥85% of the 72 buckets of the 6 h before
+    its last line; quiet once silent ≥ max(15 min, 2× longest gap in those 6 h); silences >6 h
+    aren't judged. Back when a new line arrives (`append`) or counts show one. Live 2026-11-17:
+    7 of 29 services steady (unifi-siem, seerr, postgres, loki, grafana, ghost, gatus).
   - **Self-echo filter:** Loki logs every query it runs, so each poll appends
     `!= "matrix-saver-poll" != "query_type=stats"` (`LogFeed.lokiFilters`). The tag removes lines
     about the saver's own queries; Loki's per-query stats lines drop the tag, hence the second
@@ -112,7 +124,7 @@ Tools/render-test.sh   # render test, see below
   exception that freezes the sheet. The controller is independent of any view because System
   Settings drops the view while the sheet is open.
   - Logs tab: Source (file / Loki), Log file, Loki URL, **Services** (pull-down of checkboxes;
-    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives", "Write new errors across the screen". Pages are 11 rows. Services fetches
+    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives", "Write new errors across the screen", "Warn when logging goes quiet" (Loki only). Pages are 12 rows. Services fetches
     `/loki/api/v1/label/service_name/values` for the last 7 days and writes
     `{service_name=~"a|b"}` into Query. Any other query shows as "Custom query".
   - Migration in `Settings.load()`: an `http(s)://` in `logPath` (from a test build) moves to
@@ -131,6 +143,16 @@ protection). To change the installed saver's settings, ask Troy to use Options.
 
 ## Testing
 
+- **`Tools/feed-test.sh`: run it after any change to `LogFeed`**, and add checks for new feed
+  behaviour to `Tools/feed-test/Tests.swift`. `LogFeed` is `private`, so the script appends
+  `Tests.swift` to a copy of `MatrixView.swift` (`build/feed-test/Combined.swift`); the tests are
+  static funcs in an `extension LogFeed` and can use its private members (e.g. `pollFile`,
+  `fetchLoki`, `fresh`, `lokiDownSince`) and its private init (no shared instance). Loki is faked
+  with a `URLProtocol` (`FakeLoki`, host `fake-loki.test`, `handler` gives status + JSON, and
+  `requests` records the URLs). Groups: cleanup, levels, keywords, shape, fair share, volume,
+  file (tail, big append, rename/inode/truncate rotation, folding, empty/missing), loki (start,
+  overlap/late/repeat, quiet check, down/back, unreachable at start), loki start rounds, quiet
+  rules. Checked by breaking three behaviours in a copy: each was caught, exit status 1.
 - `Tools/render-test.sh` compiles `MatrixView.swift` with a small driver and renders frames.
   Settings come from environment variables: `SOURCE` (file or Loki URL), `QUERY`, `DURATION`,
   `COLOR` (4 = Red), `OUT`, `SHEET` + `TAB` (Options tab to PNG), `MENU=1` (drive the Services
@@ -245,15 +267,19 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   on). Tested with a scratch harness: a 1500-line file of firewall lines with random IPs/MACs
   plus 20 distinct lines kept 21 lines; a new repeat replaced the old one; live Loki per-source
   counts; a render.
+- **2.11** (2026-11-17, was 3.14): **quiet alerts** (see Logs mode). Tested with synthetic counts
+  (steady service quiet 20 min → alert; bursty, steady-but-live, quiet >6 h, 2-hour-old service
+  → none; a service with 10-min pauses alerted at 35 min, not 20), back via a new line and via
+  counts, no repeat alert, Loki down 10 s → none, 31 s → one red alert, back → "Loki is back",
+  grace blocks quiet alerts; live metric query (29 services, 7 steady, none quiet). Also
+  **`Tools/feed-test.sh`**, the permanent log feed test (see Testing). Banner frames aren't in
+  it (they're view-level: use render-test).
 
-Ideas not done (suggested 2026-11-15; Troy's picks were fold repeats (done), quiet-service
-alert and the test script):
-- Quiet-service alert: banner when Loki is unreachable or a usually steady service goes silent.
+Ideas not done (suggested 2026-11-15; Troy's picks, fold repeats, quiet-service alert
+and the test script, are all done):
 - A shade of the rain colour per service.
 - Shorter banners: drop `level=error` etc. from banner text.
 - Stats under the clock: errors in the last hour, lines per minute.
-- `Tools/feed-test.sh`: keep the 2.7-2.9 scratch harnesses (fair share counts, banner frames,
-  file rotation, fake Loki via URLProtocol) as a permanent test.
 - Errors/warnings only; dim the start-fetch backlog; Grafana/Alertmanager alerts; Loki
   `/tail` WebSocket instead of polling; lighter rain on battery; services per display.
 - Missed: lines written to a log between the last poll and a rename (would need the file kept open).

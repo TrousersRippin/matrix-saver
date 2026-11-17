@@ -97,6 +97,13 @@ Logs (when Characters is set to Logs)
               A new error line is typed out in red across the middle of
               the screen, held for a few seconds, then melts into the
               rain (at most one every 10 seconds)
+  Warn when logging goes quiet
+              Loki only. A banner when Loki can't be reached for 30
+              seconds (red), or when a service that logs steadily stops
+              (amber), and again when it is back. A service is steady
+              if it logged in most 5-minute spells of the last 6 hours;
+              it is reported after 15 minutes without a line (longer if
+              it sometimes pauses)
 
 Logs can show user names, computer names, addresses or network names, so
 mind who can see your screen.
