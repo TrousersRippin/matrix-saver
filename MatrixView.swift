@@ -268,7 +268,8 @@ private final class LogFeed {
     static let serviceHistory = 300         // loki: lines kept per service
     static let lokiStartLimit = 2000        // loki: lines per start fetch
     static let lokiStartRounds = 5          // loki: start fetches at most (see receive)
-    static let maxLineLength = 200
+    static let maxLineLength = 200         // glyphs shown per line (see cut)
+    static let maxEncoded = 800            // glyphs encoded per line, for its shape (see store)
     static let keywordBit: UInt16 = 0x8000
     static let levelShift: UInt16 = 13     // bits 13-14: the line's Level
     static let levelBits: UInt16 = 0x6000
@@ -296,6 +297,7 @@ private final class LogFeed {
     /// The lines kept from one service (Loki's service_name; a file is one source, named "").
     private struct Source {
         var lines: [[UInt16]] = []
+        var shapes: [Int] = []           // shape(of:) of each line
         var cursor = 0
         var credit = 0.0                 // for taking turns, see nextLine
     }
@@ -383,6 +385,9 @@ private final class LogFeed {
     }
 
     /// Adds lines to a source's history (or replaces it), keeping the newest `historyCap`.
+    /// Lines that differ only in numbers are kept once (see shape(of:)): a new one replaces the
+    /// older one and moves to the newest end, so a message that repeats every few seconds doesn't
+    /// fill its source's share and push out the lines that differ.
     private func store(_ lines: [[UInt16]], in key: String, replace: Bool = false) {
         let i: Int
         if let j = sourceIndex[key] {
@@ -392,15 +397,99 @@ private final class LogFeed {
             sources.append(Source())
             sourceIndex[key] = i
         }
-        if replace {
-            sources[i].lines = Array(lines.suffix(historyCap))
-            sources[i].cursor = max(0, sources[i].lines.count - 400)  // start near the newest
-        } else {
-            let all = sources[i].lines + lines
-            let dropped = max(0, all.count - historyCap)
-            sources[i].lines = Array(all.dropFirst(dropped))
-            sources[i].cursor = max(0, sources[i].cursor - dropped)  // stay on the same line
+        // The incoming lines, each shape once (its newest line).
+        var incoming: [(text: [UInt16], shape: Int)] = []
+        var position: [Int: Int] = [:]
+        for line in lines {
+            let shape = Self.shape(of: line)  // of the whole line, before it is cut
+            if let p = position[shape] { incoming[p].text = []; incoming[p].shape = 0 }
+            position[shape] = incoming.count
+            incoming.append((Self.cut(line), shape))
         }
+        incoming.removeAll { $0.text.isEmpty }
+        var src = sources[i]
+        if replace {
+            src.lines = []
+            src.shapes = []
+        } else {
+            // Drop older lines with the same shape as an incoming one.
+            let newShapes = Set(incoming.map(\.shape))
+            var keptLines: [[UInt16]] = []
+            var keptShapes: [Int] = []
+            var cursor = src.cursor
+            for (k, line) in src.lines.enumerated() {
+                if newShapes.contains(src.shapes[k]) {
+                    if k < src.cursor { cursor -= 1 }  // stay on the same line
+                } else {
+                    keptLines.append(line)
+                    keptShapes.append(src.shapes[k])
+                }
+            }
+            src.lines = keptLines
+            src.shapes = keptShapes
+            src.cursor = cursor
+        }
+        src.lines += incoming.map(\.text)
+        src.shapes += incoming.map(\.shape)
+        let dropped = max(0, src.lines.count - historyCap)
+        src.lines.removeFirst(dropped)
+        src.shapes.removeFirst(dropped)
+        src.cursor = replace ? max(0, src.lines.count - 400)  // start near the newest
+                             : max(0, src.cursor - dropped)
+        sources[i] = src
+    }
+
+    /// A line shortened to what is shown. Lines are encoded longer than this so that the shape of
+    /// a long line doesn't depend on where the cut falls (numbers of different widths move it).
+    static func cut(_ text: [UInt16]) -> [UInt16] {
+        guard text.count > maxLineLength else { return text }
+        var out = Array(text.prefix(maxLineLength))
+        while let last = out.last, last & glyphBits == 0 { out.removeLast() }
+        return out
+    }
+
+    /// A hash of a line with its numbers folded, to tell repeats (see store). Every run of hex
+    /// digits (joined by : . -) that holds a decimal digit (12, 10.1.1.11, a4:cc:5e, 12:04:31)
+    /// counts as one "#", so lines that differ only in times, counters, addresses or ports match.
+    /// Words like "cafe" or "added" have no digit and are kept as they are. The words are compared
+    /// in any order, because some programs (Grafana) write their key=value fields shuffled.
+    static func shape(of text: [UInt16]) -> Int {
+        var words: [Int] = []
+        var h = Hasher()
+        var empty = true
+        var run: [UInt16] = []
+        var runHasDigit = false
+        func flush() {
+            if runHasDigit { h.combine(UInt16(0xFFFF)) } else { for g in run { h.combine(g) } }
+            if !run.isEmpty { empty = false }
+            run.removeAll(keepingCapacity: true)
+            runHasDigit = false
+        }
+        func endWord() {
+            flush()
+            if !empty { words.append(h.finalize()) }
+            h = Hasher()
+            empty = true
+        }
+        for raw in text {
+            let g = raw & glyphBits             // glyph index = scalar - 0x20
+            if g == 0 { endWord(); continue }   // space
+            let digit = g >= 0x10 && g <= 0x19                    // 0-9
+            let hex = digit || (g >= 0x41 && g <= 0x46) || (g >= 0x21 && g <= 0x26)  // a-f, A-F
+            let joiner = g == 0x1A || g == 0x0E || g == 0x0D                         // : . -
+            if hex || (joiner && !run.isEmpty) {
+                run.append(g)
+                runHasDigit = runHasDigit || digit
+            } else {
+                flush()
+                h.combine(g)
+                empty = false
+            }
+        }
+        endWord()
+        var line = Hasher()
+        for w in words.sorted() { line.combine(w) }
+        return line.finalize()
     }
 
     private var lineCount: Int { sources.reduce(0) { $0 + $1.lines.count } }
@@ -435,7 +524,7 @@ private final class LogFeed {
     private func append(_ lines: [(key: String, text: [UInt16])]) {
         guard !lines.isEmpty else { return }
         if placeholder { clearSources() }
-        fresh = Array((fresh + lines.map(\.text)).suffix(200))
+        fresh = Array((fresh + lines.map { Self.cut($0.text) }).suffix(200))
         arrivals.append((CACurrentMediaTime(), lines.count))
         if baseline == nil { seedCount += lines.count }
         for (key, group) in Dictionary(grouping: lines, by: \.key) { store(group.map(\.text), in: key) }
@@ -801,7 +890,7 @@ private final class LogFeed {
             case 0x09: out.append(0)
             default: continue  // other characters have no glyph
             }
-            if out.count >= Self.maxLineLength { break }
+            if out.count >= Self.maxEncoded { break }
         }
         while out.last == 0 { out.removeLast() }
         while out.first == 0 { out.removeFirst() }

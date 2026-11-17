@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.9**.
+- Current version: **2.10**.
 
 ## Features
 
@@ -38,6 +38,8 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
   lines, then new ones as they arrive. Services share the rain fairly, so a chatty one doesn't
   drown the quiet ones: a service that logs 26 lines an hour still gets seen next to one that
   logs 3000.
+- **Repeats folded:** lines that differ only in numbers (times, counters, IP and MAC addresses,
+  ports) are kept once, so a message logged every few seconds doesn't crowd out the rest.
 - **Keywords** such as `error, fail, denied, fatal` are shown in red (white on red rain).
 - **Log levels:** error lines are red, warnings amber and debug lines dimmed. The level comes from
   the line (`level=error`, `ERR`, `[warn]`, `WARNING:`, a CEF severity) or from Loki's labels.
@@ -114,7 +116,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.9' -c 'Set :CFBundleVersion 12' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.10' -c 'Set :CFBundleVersion 13' Info.plist
 ```
 
 ### Render test
@@ -173,6 +175,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.10 | Lines that differ only in numbers are kept once, so repeated messages don't crowd out the rest |
 | 2.9 | Fixes: log rotation that replaces the file is noticed; a big burst of lines no longer starts mid-line; Loki lines that arrive late are no longer missed |
 | 2.8 | A new error line is written across the screen, then melts into the rain |
 | 2.7 | Loki: services share the rain fairly, and quiet services' lines are fetched from further back |

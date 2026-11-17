@@ -75,6 +75,13 @@ Tools/render-test.sh   # render test, see below
     the shown name; a file is one source "") with 300 lines each (3000 for a file). `nextLine()`
     takes new lines first, then picks a source by smooth weighted round-robin, weight
     sqrt(line count). Measured with all ~27 services: unifi-siem went from 52% of drops to 6%.
+  - **Folding repeats** (always on): `store()` keeps one line per shape per source, the newest,
+    moved to the newest end. `LogFeed.shape(of:)` hashes a line with every hex run (joined by
+    `: . -`) holding a decimal digit folded to one mark, words compared in any order (Grafana
+    shuffles its logfmt keys). Lines are encoded up to `maxEncoded` (800) glyphs so the shape is
+    of the whole line, then `cut()` to `maxLineLength` (200) in `store`/`append`; otherwise
+    numbers of different widths moved the cut and long repeats didn't match. New lines still all
+    rain (`fresh` isn't folded). Live: unifi-siem 300 kept lines → ~23, grafana 300 → ~39.
   - **Self-echo filter:** Loki logs every query it runs, so each poll appends
     `!= "matrix-saver-poll" != "query_type=stats"` (`LogFeed.lokiFilters`). The tag removes lines
     about the saver's own queries; Loki's per-query stats lines drop the tag, hence the second
@@ -234,10 +241,13 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   a fake Loki via `URLProtocol` (a local Python HTTP server couldn't be reached on this Mac, even
   unsandboxed); 40 s live against the home Loki. Also `make-dmg.sh --zip` (2026-11-16):
   releases are a DMG and a zip from then on.
+- **2.10** (2026-11-17, was 3.13): **fold repeated lines** in the history (see Logs mode, always
+  on). Tested with a scratch harness: a 1500-line file of firewall lines with random IPs/MACs
+  plus 20 distinct lines kept 21 lines; a new repeat replaced the old one; live Loki per-source
+  counts; a render.
 
-Ideas not done (suggested 2026-11-15; Troy's picks were 1, 2 and the test script):
-- Fold repeated lines: unifi-siem kernel messages repeat every ~18 s and fill its 300-line
-  share; keep lines that differ only in numbers once.
+Ideas not done (suggested 2026-11-15; Troy's picks were fold repeats (done), quiet-service
+alert and the test script):
 - Quiet-service alert: banner when Loki is unreachable or a usually steady service goes silent.
 - A shade of the rain colour per service.
 - Shorter banners: drop `level=error` etc. from banner text.
