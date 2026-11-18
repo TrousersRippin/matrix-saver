@@ -53,6 +53,7 @@ func runFeedTests(scratch: String) -> Bool {
         ("shape", LogFeed.testShape),
         ("banner", LogFeed.testBanner),
         ("fair share", LogFeed.testFairShare),
+        ("displays", LogFeed.testDisplays),
         ("volume", LogFeed.testVolume),
         ("file", { LogFeed.testFile(scratch) }),
         ("loki", LogFeed.testLoki),
@@ -274,6 +275,53 @@ extension LogFeed {
         check(next.isNew && text(next.text) == "tiny brand new", "new lines come first, marked new")
     }
 
+    // MARK: Displays
+
+    static func testDisplays() {
+        let f = LogFeed(source: .file("/nonexistent/feed-test"), keywords: [], levels: true)
+        f.clearSources()
+        let sizes = [("alpha", 300), ("bravo", 100), ("charlie", 50), ("delta", 10), ("echo", 2)]
+        for (key, n) in sizes {
+            f.store((0..<n).map { f.encode("\(key) \(word($0))", level: .normal) }, in: key)
+        }
+        let name = { (t: [UInt16]) in String(text(t).prefix { $0 != " " }) }
+        var seen: [Set<String>] = [[], []]
+        for p in 0..<2 { for _ in 0..<2000 { seen[p].insert(name(f.nextLine(part: (p, 2)).text)) } }
+        check(!seen[0].isEmpty && !seen[1].isEmpty, "both displays get sources", "\(seen)")
+        expectEqual(seen[0].intersection(seen[1]), [], "no source on both displays")
+        expectEqual(seen[0].union(seen[1]), Set(sizes.map(\.0)), "every source on some display")
+        let owner = f.owner(parts: 2)
+        let load = (0..<2).map { p in f.sources.indices.filter { owner[$0] == p }
+            .reduce(0.0) { $0 + Double(f.sources[$1].lines.count).squareRoot() } }
+        check(abs(load[0] - load[1]) < 5, "weight split evenly", "\(load)")
+
+        f.store([f.encode("echo extra line", level: .normal)], in: "echo")
+        expectEqual(f.owner(parts: 2), owner, "more lines in a source: no reshuffle")
+        f.store([f.encode("foxtrot one", level: .normal)], in: "foxtrot")
+        expectEqual(f.owner(parts: 2).count, 6, "a new source: split again")
+
+        let a = f.owner(parts: 2)[f.sourceIndex["alpha"]!]
+        f.append([("alpha", f.encode("alpha brand new", level: .normal))])
+        let other = f.nextLine(part: (1 - a, 2))
+        check(!other.isNew && name(other.text) != "alpha", "a new line skips the other display")
+        let own = f.nextLine(part: (a, 2))
+        check(own.isNew && text(own.text) == "alpha brand new", "a new line goes to its display")
+
+        f.append([("bravo", f.encode("bravo error: disk full", level: .error))])
+        let e0 = f.nextLine(part: (0, 2)), e1 = f.nextLine(part: (1, 2))
+        check(e0.isNew && e1.isNew && text(e0.text) == text(e1.text), "a new error goes to every display")
+        expectEqual(f.fresh.count, 0, "and is gone once both showed it")
+
+        f.append([("delta", f.encode("delta unsplit", level: .normal))])
+        let whole = f.nextLine()
+        check(whole.isNew && text(whole.text) == "delta unsplit", "no split (preview): takes any new line")
+
+        f.clearSources()
+        f.store([f.encode("only one", level: .normal)], in: "only")
+        let lone = f.nextLine(part: (1, 2))
+        expectEqual(text(lone.text), "only one", "a display with no sources shows them all")
+    }
+
     // MARK: Volume
 
     static func testVolume() {
@@ -312,7 +360,7 @@ extension LogFeed {
 
         write(["second one", "second two", "second three"])
         f.pollFile(path)
-        expectEqual(f.fresh.map(text), ["second one", "second two", "second three"], "appended lines are new")
+        expectEqual(f.fresh.map { text($0.text) }, ["second one", "second two", "second three"], "appended lines are new")
         f.fresh = []
 
         // More than tailBytes appended at once: read from the first whole line in the last 256 KB.
@@ -333,7 +381,7 @@ extension LogFeed {
         try! FileManager.default.moveItem(atPath: path, toPath: path + ".1")
         write(["rotated one", "rotated two"], append: false)
         f.pollFile(path)
-        expectEqual(f.fresh.map(text), ["rotated one", "rotated two"], "rotation: the new file's lines are new")
+        expectEqual(f.fresh.map { text($0.text) }, ["rotated one", "rotated two"], "rotation: the new file's lines are new")
         expectEqual(f.lines("").count, before + 2, "rotation: history kept")
         f.fresh = []
 
@@ -343,13 +391,13 @@ extension LogFeed {
         let third = (0..<5).map { "third file \(word($0)) with a longer line" }
         write(third, append: false)
         f.pollFile(path)
-        expectEqual(f.fresh.map(text), third, "rotation to a bigger file: all its lines, from the start")
+        expectEqual(f.fresh.map { text($0.text) }, third, "rotation to a bigger file: all its lines, from the start")
         f.fresh = []
 
         // Copy-and-truncate.
         write(["truncated"], append: false)  // same inode, shorter
         f.pollFile(path)
-        expectEqual(f.fresh.map(text), ["truncated"], "copy-truncate: the file is read from its start")
+        expectEqual(f.fresh.map { text($0.text) }, ["truncated"], "copy-truncate: the file is read from its start")
 
         // Repeats fold when the file is loaded.
         let foldPath = dir + "/fold.log"
@@ -405,7 +453,7 @@ extension LogFeed {
         let p = FakeLoki.requests.first
         expectEqual(p.map { FakeLoki.param($0, "direction") }, "forward", "poll: oldest first")
         expectEqual(p.map { FakeLoki.param($0, "start") }, String(t0 - lokiOverlap), "poll starts 30 s before the newest")
-        expectEqual(f.fresh.map(text), ["postgres: late arrival", "web: brand new"], "late line caught, repeat skipped")
+        expectEqual(f.fresh.map { text($0.text) }, ["postgres: late arrival", "web: brand new"], "late line caught, repeat skipped")
         f.fresh = []
         f.fetchLoki()
         wait { !f.lokiBusy }

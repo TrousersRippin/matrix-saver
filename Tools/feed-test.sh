@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Tests the log feed (LogFeed in MatrixView.swift): line cleanup, levels, folding repeats, fair
 # share, volume, file tailing and rotation, Loki fetches against a fake server, and quiet alerts.
-# Needs no network and no Loki. Prints each check and exits non-zero if any fail.
+# Also splitting services across displays. Needs no network and no Loki. Prints each check and exits non-zero if any fail.
 #
 # LogFeed is private to MatrixView.swift, so the tests are appended to a copy of that file and
 # compiled with it; the saver's own source is unchanged. Output goes in build/feed-test.

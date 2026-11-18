@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.12**.
+- Current version: **2.13**.
 
 ## Features
 
@@ -22,6 +22,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 - Depth: three layers of rain, with distant streams smaller, dimmer and slower.
 - Glow, CRT scanlines and vignette, occasional glitches.
 - 15, 30 or 60 fps. Rain on every display, or the main display only.
+- Lighter rain on battery: half the rain, at most 20 fps, until the Mac is plugged in again.
 
 **Text**
 - A rain clock that shows the time in the rain.
@@ -51,6 +52,8 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
   (`level=error`, `ERR`, `[error]`), process ids and noise fields go, and the message comes first.
 - **Quiet alert** (Loki): a banner when Loki can't be reached, or when a service that logs
   steadily stops for 15 minutes (longer if it sometimes pauses), and again when it's back.
+- **Services split across displays** (Loki): with more than one display, each shows its own
+  share of the services, with a similar mix on each. New errors still show on every display.
 - Lines are tidied for the rain: terminal colour codes, timestamps and repeated host names are removed, JSON logs become
   `level message key=value`, and logfmt noise (`ts=`, `caller=`, …) is dropped.
 
@@ -120,7 +123,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.12' -c 'Set :CFBundleVersion 15' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.13' -c 'Set :CFBundleVersion 16' Info.plist
 ```
 
 ### Render test
@@ -187,6 +190,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.13 | Lighter rain on battery; Loki services split across displays |
 | 2.12 | Error banners are shorter: the level, process ids and noise fields go, and the message comes first |
 | 2.11 | Loki: a banner when Loki can't be reached or a steady service goes quiet, and when it's back |
 | 2.10 | Lines that differ only in numbers are kept once, so repeated messages don't crowd out the rest |

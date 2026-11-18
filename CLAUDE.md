@@ -22,10 +22,11 @@ session update **Status and history** and anything else that changed.
 | `dist/` | Release DMGs |
 | `readme.md` | GitHub readme: features, install, Loki setup, building, version history. Update it with each release |
 
-**Git:** repo on `main`, remote `git@github.com:TrousersRippin/matrix-saver.git` (first commit
-2026-11-06). `.gitignore` ignores `build/`, `dist/` and `.DS_Store` (they were tracked in the
-first commit and untracked afterwards). Troy's global `~/.config/git/ignore` ignores `.gitignore`
-itself, so it was force-added (`git add -f`); once tracked, edits to it show up normally. Commit or push only
+**Git:** repo on `main`, remote `git@github.com:TrousersRippin/matrix-saver.git`. On 2026-11-18
+the history was rewritten so each version is one commit, 1.0 to 2.13 (see Status and history for
+the old numbers), each with a lightweight tag `vX.Y` on its commit. `.gitignore` ignores `build/`, `dist/` and
+`.DS_Store`. Troy's global `~/.config/git/ignore` ignores `.gitignore` itself, so it was
+force-added (`git add -f`); once tracked, edits to it show up normally. Commit or push only
 when Troy asks.
 
 ## Commands
@@ -36,7 +37,7 @@ when Troy asks.
 ./make-dmg.sh          # build + dist/Matrix-<CFBundleShortVersionString>.dmg
 ./make-dmg.sh --zip    # also dist/Matrix-<version>.zip (folder with saver + Instructions.txt)
 Tools/render-test.sh   # render test, see below
-Tools/feed-test.sh     # log feed tests (97 checks, ~1 min with compile); FILTER=<group> for some
+Tools/feed-test.sh     # log feed tests (133 checks, ~1 min with compile); FILTER=<group> for some
 ```
 
 ## How it works
@@ -126,12 +127,27 @@ Tools/feed-test.sh     # log feed tests (97 checks, ~1 min with compile); FILTER
     average that a burst can only pull towards 3× usual. `volume` = sqrt(ratio) clamped 0.5...2.5.
     The view eases `volumeShown` towards it and sets each `Layer.active`; layers allocate 2.5× the
     drops, and drops past `active` park (`Drop.idle`) when they finish falling.
+  - **Split across displays** (`Settings.splitDisplays`, Logs tab "Split services across
+    displays", default on, Loki only, not with Main display only): each view works out its
+    `LogFeed.Part` (its index among `NSScreen.screens` sorted left to right, of the count; nil for
+    previews or one display), rechecked every 2 s, and sets `Layer.part`;
+    `nextLine(part:)` then uses only the sources `owner(parts:)` gives that display (busiest
+    first, each to the display with least sqrt weight; recomputed only when a source is added).
+    A display that owns none uses all. `fresh` entries carry their source: a new line waits for
+    its own display; a new **error** line goes to every display (`taken`), so ripples and
+    banners show everywhere. Alerts are per view as before.
+- **Battery** (`Settings.batteryLight`, Effects tab "Lighter rain on battery", default on):
+  `checkPower` every 5 s (IOKit `IOPSGetProvidingPowerSourceType`); on battery each
+  `Layer.active` is × `batteryShare` (0.5, drops park when they finish falling, as for volume)
+  and `frameInterval` caps fps at 20. Troy's Mac is a Mac mini (`Mac16,10`), so it is never on
+  battery: tested by forcing `battery = true` in a scratch copy (moving drops 352 → ~180 over
+  ~10 s, 20 fps). Not yet checked that IOKit power info is readable in the sandbox on a laptop.
 - **Options sheet** (`OptionsController`): tabs Rain, Effects, Text, Logs. Laid out with **fixed
   frames, not Auto Layout**: in legacyScreenSaver an unsatisfiable constraint is an uncaught
   exception that freezes the sheet. The controller is independent of any view because System
   Settings drops the view while the sheet is open.
   - Logs tab: Source (file / Loki), Log file, Loki URL, **Services** (pull-down of checkboxes;
-    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives", "Write new errors across the screen", "Warn when logging goes quiet" (Loki only). Pages are 12 rows. Services fetches
+    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives", "Write new errors across the screen", "Warn when logging goes quiet" (Loki only), "Split services across displays" (Loki only). Pages are 13 rows. Services fetches
     `/loki/api/v1/label/service_name/values` for the last 7 days and writes
     `{service_name=~"a|b"}` into Query. Any other query shows as "Custom query".
   - Migration in `Settings.load()`: an `http(s)://` in `logPath` (from a test build) moves to
@@ -157,7 +173,8 @@ protection). To change the installed saver's settings, ask Troy to use Options.
   `fetchLoki`, `fresh`, `lokiDownSince`) and its private init (no shared instance). Loki is faked
   with a `URLProtocol` (`FakeLoki`, host `fake-loki.test`, `handler` gives status + JSON, and
   `requests` records the URLs). Groups: cleanup, levels, keywords, shape, fair share, volume,
-  file (tail, big append, rename/inode/truncate rotation, folding, empty/missing), loki (start,
+  displays (split, stable owners, new lines to their display, errors to all), file (tail, big
+  append, rename/inode/truncate rotation, folding, empty/missing), loki (start,
   overlap/late/repeat, quiet check, down/back, unreachable at start), loki start rounds, quiet
   rules. Checked by breaking three behaviours in a copy: each was caught, exit status 1.
 - `Tools/render-test.sh` compiles `MatrixView.swift` with a small driver and renders frames.
@@ -196,7 +213,8 @@ protection). To change the installed saver's settings, ask Troy to use Options.
    `./build.sh --install`.
 5. When Troy asks: commit, push, then `gh release create vX.Y dist/Matrix-X.Y.dmg dist/Matrix-X.Y.zip --target main
    --title "Matrix X.Y" --notes-file <notes>` (`--target` needs a branch or full SHA, not a short
-   one).
+   one). Tag each release on its version commit. Since the renumbering, GitHub has one release,
+   v2.13; the older versions have tags only.
 
 ## Troy's preferences
 
@@ -286,13 +304,17 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   dns-cache-db 110 → 86); 24 feed-test checks added; a render shows a one-row banner. Note for
   banner renders: start the background append after the test binary is built
   (`build/render-test`), or it lands while compiling and isn't new.
+- **2.13** (2026-11-17, was 3.16): **lighter rain on battery** and **services split across
+  displays** (see How it works). Feed tests 133 pass; Effects and Logs tabs rendered; battery
+  tested by forcing it in a scratch copy. Can't be checked live on this Mac: it has one display
+  (S34C65xU) and no battery. Installed on Troy's Mac (as 3.16 until rebuilt).
 
 Ideas not done (suggested 2026-11-15; Troy's picks, fold repeats, quiet-service alert
 and the test script, are all done):
 - A shade of the rain colour per service.
 - Stats under the clock: errors in the last hour, lines per minute.
 - Errors/warnings only; dim the start-fetch backlog; Grafana/Alertmanager alerts; Loki
-  `/tail` WebSocket instead of polling; lighter rain on battery; services per display.
+  `/tail` WebSocket instead of polling.
 - Missed: lines written to a log between the last poll and a rename (would need the file kept open).
 - Loki basic auth / API token (would be stored in plain text in prefs).
 - Optional "colour the whole line" for keywords.

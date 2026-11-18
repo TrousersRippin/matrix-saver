@@ -1,6 +1,7 @@
 import AppKit
 import CoreText
 import ScreenSaver
+import IOKit.ps
 import os
 
 /// User options, persisted with ScreenSaverDefaults so the preview and the real saver share them.
@@ -62,6 +63,7 @@ private struct Settings: Equatable {
     var errorRipple = true  // log mode: a ripple spreads from each new error line
     var errorBanner = true  // log mode: each new error line is written across the screen
     var quietAlerts = true  // log mode (Loki): a banner when Loki or a steady service goes quiet
+    var splitDisplays = true // log mode (Loki): each display shows its own share of the services
     var logSource = 0   // 0: a file, 1: a Loki server
     var lokiURL = ""
     var lokiQuery = Settings.defaultLokiQuery
@@ -72,6 +74,7 @@ private struct Settings: Equatable {
     var glitches = true
     var fps = 30
     var mainDisplayOnly = false
+    var batteryLight = true // half the rain, at most 20 fps, while on battery
 
     var clock = false
     var intro = true
@@ -87,10 +90,10 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "errorBanner": base.errorBanner, "quietAlerts": base.quietAlerts, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "errorBanner": base.errorBanner, "quietAlerts": base.quietAlerts, "splitDisplays": base.splitDisplays, "logSource": base.logSource, "lokiURL": base.lokiURL,
                               "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
-                              "mainDisplayOnly": base.mainDisplayOnly, "clock": base.clock, "intro": base.intro,
+                              "mainDisplayOnly": base.mainDisplayOnly, "batteryLight": base.batteryLight, "clock": base.clock, "intro": base.intro,
                               "introText": base.introText, "messages": base.messages,
                               "messageText": base.messageText])
         var s = Settings()
@@ -108,6 +111,7 @@ private struct Settings: Equatable {
         s.errorRipple = d.bool(forKey: "errorRipple")
         s.errorBanner = d.bool(forKey: "errorBanner")
         s.quietAlerts = d.bool(forKey: "quietAlerts")
+        s.splitDisplays = d.bool(forKey: "splitDisplays")
         s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
         s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
         s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
@@ -125,6 +129,7 @@ private struct Settings: Equatable {
         let fps = d.integer(forKey: "fps")
         s.fps = frameRates.contains(fps) ? fps : base.fps
         s.mainDisplayOnly = d.bool(forKey: "mainDisplayOnly")
+        s.batteryLight = d.bool(forKey: "batteryLight")
         s.clock = d.bool(forKey: "clock")
         s.intro = d.bool(forKey: "intro")
         s.introText = d.string(forKey: "introText") ?? base.introText
@@ -149,6 +154,7 @@ private struct Settings: Equatable {
         d.set(errorRipple, forKey: "errorRipple")
         d.set(errorBanner, forKey: "errorBanner")
         d.set(quietAlerts, forKey: "quietAlerts")
+        d.set(splitDisplays, forKey: "splitDisplays")
         d.set(logSource, forKey: "logSource")
         d.set(lokiURL, forKey: "lokiURL")
         d.set(lokiQuery, forKey: "lokiQuery")
@@ -158,6 +164,7 @@ private struct Settings: Equatable {
         d.set(glitches, forKey: "glitches")
         d.set(fps, forKey: "fps")
         d.set(mainDisplayOnly, forKey: "mainDisplayOnly")
+        d.set(batteryLight, forKey: "batteryLight")
         d.set(clock, forKey: "clock")
         d.set(intro, forKey: "intro")
         d.set(introText, forKey: "introText")
@@ -306,7 +313,19 @@ private final class LogFeed {
     }
     private var sources: [Source] = []
     private var sourceIndex: [String: Int] = [:]
-    private var fresh: [[UInt16]] = []   // arrived since the saver started
+    /// A line that arrived since the saver started, waiting for a drop. With the services split
+    /// across displays (see Part), it waits for a drop on the display that shows its source; an
+    /// error line is shown on every display, so it waits until each has taken it.
+    private struct Fresh {
+        var text: [UInt16]
+        var source: Int
+        var error: Bool
+        var taken: Set<Int> = []         // displays (Part.index) that have shown it
+    }
+    private var fresh: [Fresh] = []
+    /// One display's share of the sources: display `index` of `count`, numbered left to right.
+    typealias Part = (index: Int, count: Int)
+    private var owners: (parts: Int, sources: Int, owner: [Int])?  // see owner(parts:)
     private var placeholder = false      // the history is a status message, not log lines
     private var lastPoll: CFTimeInterval = 0
 
@@ -371,11 +390,31 @@ private final class LogFeed {
     /// the one with most credit goes and pays the total). The weight is the square root of the
     /// lines a source has, so a service with 300 lines comes up about 5× as often as one with 10,
     /// not 30×: quiet services get seen, and their few lines don't repeat on every turn.
-    func nextLine() -> (text: [UInt16], isNew: Bool) {
-        if !fresh.isEmpty { return (fresh.removeFirst(), true) }
+    ///
+    /// With a `part`, only the sources owned by that display are used (see owner(parts:)); a
+    /// display that owns none (more displays than sources) uses them all.
+    func nextLine(part: Part? = nil) -> (text: [UInt16], isNew: Bool) {
+        var mine: (Int) -> Bool = { _ in true }
+        if let part, part.count > 1 {
+            let owner = owner(parts: part.count)
+            if owner.contains(part.index) { mine = { owner[$0] == part.index } }
+        }
+        if let part, part.count > 1 {
+            if let i = fresh.firstIndex(where: { $0.error ? !$0.taken.contains(part.index) : mine($0.source) }) {
+                let text = fresh[i].text
+                if fresh[i].error {
+                    fresh[i].taken.insert(part.index)
+                    if fresh[i].taken.count < part.count { return (text, true) }
+                }
+                fresh.remove(at: i)
+                return (text, true)
+            }
+        } else if !fresh.isEmpty {
+            return (fresh.removeFirst().text, true)
+        }
         var total = 0.0
         var best = -1
-        for i in sources.indices where !sources[i].lines.isEmpty {
+        for i in sources.indices where !sources[i].lines.isEmpty && mine(i) {
             let w = Double(sources[i].lines.count).squareRoot()
             total += w
             sources[i].credit += w
@@ -388,6 +427,27 @@ private final class LogFeed {
         return (sources[best].lines[sources[best].cursor], false)
     }
 
+    /// Which display shows each source, when the sources are split across `parts` displays.
+    /// Busiest first (by the same weight as nextLine), each goes to the display with the least
+    /// weight so far, so every display gets a similar mix. Worked out again only when a source
+    /// is added, so services don't hop between displays as their line counts change.
+    private func owner(parts: Int) -> [Int] {
+        if let o = owners, o.parts == parts, o.sources == sources.count { return o.owner }
+        var name = Array(repeating: "", count: sources.count)
+        for (key, i) in sourceIndex { name[i] = key }
+        let weight = sources.map { Double($0.lines.count).squareRoot() }
+        let order = sources.indices.sorted { weight[$0] != weight[$1] ? weight[$0] > weight[$1] : name[$0] < name[$1] }
+        var load = Array(repeating: 0.0, count: parts)
+        var owner = Array(repeating: 0, count: sources.count)
+        for i in order {
+            let p = load.indices.min { load[$0] < load[$1] }!
+            owner[i] = p
+            load[p] += max(weight[i], 1)
+        }
+        owners = (parts, sources.count, owner)
+        return owner
+    }
+
     private var historyCap: Int {
         if case .file = source { return Self.maxHistory }
         return Self.serviceHistory
@@ -396,6 +456,7 @@ private final class LogFeed {
     private func clearSources() {
         sources = []
         sourceIndex = [:]
+        owners = nil
         placeholder = false
     }
 
@@ -543,11 +604,13 @@ private final class LogFeed {
     private func append(_ lines: [(key: String, text: [UInt16])]) {
         guard !lines.isEmpty else { return }
         if placeholder { clearSources() }
-        fresh = Array((fresh + lines.map { Self.cut($0.text) }).suffix(200))
         arrivals.append((CACurrentMediaTime(), lines.count))
         if baseline == nil { seedCount += lines.count }
         for key in Set(lines.map(\.key)) where quiet[key] != nil { serviceBack(key) }
         for (key, group) in Dictionary(grouping: lines, by: \.key) { store(group.map(\.text), in: key) }
+        let new = lines.map { Fresh(text: Self.cut($0.text), source: sourceIndex[$0.key] ?? 0,
+                                    error: Self.level(of: $0.text) == .error) }
+        fresh = Array((fresh + new).suffix(200))
     }
 
     // MARK: Alerts
@@ -1195,6 +1258,7 @@ private final class Layer {
     var newErrors: [(col: Int, row: Int, text: [UInt16])] = []  // new error lines that started this step
     var randomGlyphs: UInt16 = 1  // glyphs the rain may pick; message letters follow these
     var feed: LogFeed?            // set in log mode: drops spell its lines instead of random glyphs
+    var part: LogFeed.Part?       // log mode: this display's share of the services, if split
 
     var trailGlyphs: [CGImage] = []  // white, soft glow; tinted with the frame
     var headGlyphs: [CGImage] = []   // white, full glow; tinted with the frame
@@ -1219,7 +1283,7 @@ private final class Layer {
         var d = Drop(col: Int.random(in: 0..<cols), y: y,
                      speed: Float.random(in: 9...26) * speed * speedScale, lastRow: Int(floor(y)))
         if let feed {
-            let line = feed.nextLine()
+            let line = feed.nextLine(part: part)
             d.text = line.text
             d.ripple = line.isNew && LogFeed.level(of: line.text) == .error
             d.startRow = Int.random(in: 0...(rows / 3))
@@ -1340,6 +1404,10 @@ final class MatrixView: ScreenSaverView {
     private var logFeed: LogFeed?
     private var volumeShown = 1.0       // log volume as the rain shows it (eased); see LogFeed.volume
     private var glyphScale: CGFloat = 2
+    private var onBattery = false
+    private var lastPowerCheck: CFTimeInterval = 0
+    private var displayPart: LogFeed.Part?
+    private var lastPartCheck: CFTimeInterval = 0
     private var inkTint: [CGColor?]?   // colours inkGlyphs were rendered in, if any
 
     private var introLines: [String] = []
@@ -1370,7 +1438,7 @@ final class MatrixView: ScreenSaverView {
 
     override init?(frame: NSRect, isPreview: Bool) {
         super.init(frame: frame, isPreview: isPreview)
-        animationTimeInterval = 1.0 / Double(settings.fps)
+        animationTimeInterval = frameInterval
         NotificationCenter.default.addObserver(self, selector: #selector(optionsDidChange),
                                                name: .matrixOptionsChanged, object: nil)
         if !isPreview {
@@ -1403,6 +1471,48 @@ final class MatrixView: ScreenSaverView {
         glitchBands = []
         laidOutSize = .zero  // lay out afresh if this instance is ever drawn again
     }
+
+    // MARK: - Battery and displays
+
+    static let batteryShare = 0.5     // of the drops, while on battery
+    static let batteryFPS = 20        // frame rate at most, while on battery
+
+    private var lightRain: Bool { settings.batteryLight && onBattery }
+
+    private var frameInterval: TimeInterval {
+        1.0 / Double(lightRain ? min(settings.fps, Self.batteryFPS) : settings.fps)
+    }
+
+    /// True when the Mac is running on its battery (false on a desktop, or if it can't be told).
+    private static func runningOnBattery() -> Bool {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() else { return false }
+        return (type as String) == kIOPMBatteryPowerKey
+    }
+
+    /// Checked every few seconds; the rain thins (parked drops, as for log volume) and the frame
+    /// rate drops while on battery.
+    private func checkPower(_ now: CFTimeInterval) {
+        guard now - lastPowerCheck >= 5 || lastPowerCheck == 0 else { return }
+        lastPowerCheck = now
+        let battery = Self.runningOnBattery()
+        guard battery != onBattery else { return }
+        onBattery = battery
+        Self.log.notice("power: \(battery ? "battery" : "mains", privacy: .public)")
+        animationTimeInterval = frameInterval
+    }
+
+    /// This display's share of the Loki services, when they are split across displays: its place
+    /// among the displays, left to right. Nil for a preview, a single display, or no split.
+    private func currentPart() -> LogFeed.Part? {
+        guard settings.splitDisplays, !settings.mainDisplayOnly, !isPreview,
+              case .loki = settings.logSourceValue, let screen = window?.screen else { return nil }
+        let screens = NSScreen.screens.sorted { ($0.frame.minX, $0.frame.minY) < ($1.frame.minX, $1.frame.minY) }
+        guard screens.count > 1, let i = screens.firstIndex(of: screen) else { return nil }
+        return (i, screens.count)
+    }
+
+    private static let log = Logger(subsystem: "local.agentsmith.MatrixSaver", category: "view")
 
     /// True on a secondary display when the saver is set to the main display only. The primary
     /// display's origin is always zero. With no screen to go on, the saver draws as normal.
@@ -1580,7 +1690,7 @@ final class MatrixView: ScreenSaverView {
             settings = latest
             laidOutSize = .zero
         }
-        animationTimeInterval = 1.0 / Double(settings.fps)
+        animationTimeInterval = frameInterval
         super.startAnimation()
         lastTime = CACurrentMediaTime()
 
@@ -1617,14 +1727,25 @@ final class MatrixView: ScreenSaverView {
         }
 
         if settings.clock { updateClock(front) }
+        let now = CACurrentMediaTime()
+        checkPower(now)
+        var share = lightRain ? Self.batteryShare : 1
         if let logFeed {
             logFeed.watchQuiet = settings.quietAlerts
             logFeed.poll()
             if settings.followVolume {
                 // Ease towards the feed's volume over a few seconds, so the rain swells and thins.
                 volumeShown += (logFeed.volume - volumeShown) * Double(min(1, dt * 0.4))
-                for layer in layers { layer.active = Int((Double(layer.baseDrops) * volumeShown).rounded()) }
+                share *= volumeShown
             }
+            if now - lastPartCheck >= 2 || lastPartCheck == 0 {
+                lastPartCheck = now
+                displayPart = currentPart()
+            }
+        }
+        for layer in layers {
+            layer.active = max(1, Int((Double(layer.baseDrops) * share).rounded()))
+            layer.part = displayPart
         }
         if !stepGlitch(dt, front) {
             let speed = Float(settings.speed) * Settings.baseSpeed
@@ -2110,7 +2231,7 @@ final class MatrixView: ScreenSaverView {
 
     @objc private func optionsDidChange() {
         settings = Settings.load()
-        animationTimeInterval = 1.0 / Double(settings.fps)
+        animationTimeInterval = frameInterval
         laidOutSize = .zero  // force re-layout with the new options
         setNeedsDisplay(bounds)
     }
@@ -2176,6 +2297,7 @@ private final class OptionsController: NSObject {
     private var glitchCheck: NSButton!
     private var fpsPopup: NSPopUpButton!
     private var displayPopup: NSPopUpButton!
+    private var batteryCheck: NSButton!
 
     private var clockCheck: NSButton!
     private var introCheck: NSButton!
@@ -2196,6 +2318,7 @@ private final class OptionsController: NSObject {
     private var rippleCheck: NSButton!
     private var bannerCheck: NSButton!
     private var quietCheck: NSButton!
+    private var splitCheck: NSButton!
     private var logsNote: NSTextField!
 
     private override init() {
@@ -2270,7 +2393,7 @@ private final class OptionsController: NSObject {
             return f
         }
         func newPage() {
-            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 12))
+            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 13))
             content.addSubview(page)
             pages.append(page)
             parent = page
@@ -2328,6 +2451,7 @@ private final class OptionsController: NSObject {
         fpsPopup = popup(["15 fps (saves power)", "30 fps", "60 fps"], row: 4)
         label("Displays:", row: 5)
         displayPopup = popup(["Every display", "Main display only"], row: 5)
+        batteryCheck = checkbox("Lighter rain on battery", row: 6, x: controlX)
 
         // Text page.
         newPage()
@@ -2366,10 +2490,11 @@ private final class OptionsController: NSObject {
         rippleCheck = checkbox("Ripple when an error arrives", row: 8, x: controlX)
         bannerCheck = checkbox("Write new errors across the screen", row: 9, x: controlX)
         quietCheck = checkbox("Warn when logging goes quiet", row: 10, x: controlX)
+        splitCheck = checkbox("Split services across displays", row: 11, x: controlX)
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 11 * rowH + 2, width: wideW, height: rowH * 1.5)
+        logsNote.frame = NSRect(x: controlX, y: 12 * rowH + 2, width: wideW, height: rowH * 1.5)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
@@ -2377,7 +2502,7 @@ private final class OptionsController: NSObject {
         originY = margin
 
         // Credit line. Bundle.main is the host process here, so look up the saver's own bundle.
-        let creditRow: CGFloat = 13.35
+        let creditRow: CGFloat = 14.35
         let version = Bundle(for: OptionsController.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let credit = NSTextField(labelWithString: "Version \(version) · Agent Smith")
         credit.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -2440,6 +2565,7 @@ private final class OptionsController: NSObject {
         glitchCheck.state = s.glitches ? .on : .off
         fpsPopup.selectItem(at: Settings.frameRates.firstIndex(of: s.fps) ?? 1)
         displayPopup.selectItem(at: s.mainDisplayOnly ? 1 : 0)
+        batteryCheck.state = s.batteryLight ? .on : .off
 
         clockCheck.state = s.clock ? .on : .off
         introCheck.state = s.intro ? .on : .off
@@ -2457,6 +2583,7 @@ private final class OptionsController: NSObject {
         rippleCheck.state = s.errorRipple ? .on : .off
         bannerCheck.state = s.errorBanner ? .on : .off
         quietCheck.state = s.quietAlerts ? .on : .off
+        splitCheck.state = s.splitDisplays ? .on : .off
         controlsChanged()
     }
 
@@ -2491,6 +2618,7 @@ private final class OptionsController: NSObject {
         rippleCheck.isEnabled = logs
         bannerCheck.isEnabled = logs
         quietCheck.isEnabled = logs && loki
+        splitCheck.isEnabled = logs && loki && displayPopup.indexOfSelectedItem == 0
         logsNote.stringValue = logs
             ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
                     : "Shows the end of the file, then new lines as they are written.")
@@ -2636,6 +2764,7 @@ private final class OptionsController: NSObject {
         s.glitches = glitchCheck.state == .on
         s.fps = Settings.frameRates[fpsPopup.indexOfSelectedItem]
         s.mainDisplayOnly = displayPopup.indexOfSelectedItem == 1
+        s.batteryLight = batteryCheck.state == .on
         s.clock = clockCheck.state == .on
         s.intro = introCheck.state == .on
         s.introText = introField.stringValue
@@ -2647,6 +2776,7 @@ private final class OptionsController: NSObject {
         s.errorRipple = rippleCheck.state == .on
         s.errorBanner = bannerCheck.state == .on
         s.quietAlerts = quietCheck.state == .on
+        s.splitDisplays = splitCheck.state == .on
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)

@@ -54,6 +54,10 @@ Effects
   Glitches    Now and then a patch flickers or the screen stutters
   Frame rate  15, 30 or 60 frames per second. 15 uses the least power
   Displays    Rain on every display, or on the main display only
+  Lighter rain on battery
+              On a laptop running on its battery, half as much rain at
+              no more than 20 frames per second. Back to normal when
+              plugged in
 
 Text
 
@@ -106,6 +110,11 @@ Logs (when Characters is set to Logs)
               if it logged in most 5-minute spells of the last 6 hours;
               it is reported after 15 minutes without a line (longer if
               it sometimes pauses)
+  Split services across displays
+              Loki only, with more than one display. The services are
+              shared out between the displays, each with a similar mix,
+              so every screen shows different ones. New errors still
+              show on every display
 
 Logs can show user names, computer names, addresses or network names, so
 mind who can see your screen.
