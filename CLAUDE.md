@@ -15,7 +15,7 @@ session update **Status and history** and anything else that changed.
 | `Info.plist` | Bundle info. Version lives here (see Releasing) |
 | `Instructions.txt` | User docs, shipped in the DMG. Update it when options change |
 | `build.sh` | Builds `build/Matrix.saver`. `--install` also installs it; `--thumbnail` regenerates thumbnails |
-| `make-dmg.sh` | Builds and packages `dist/Matrix-<version>.dmg` (drives Finder to lay out the window); `--zip` also makes `dist/Matrix-<version>.zip` |
+| `make-dmg.sh` | Builds and packages `dist/Matrix-<version>.dmg` (drives Finder to lay out the window), plus `dist/matrix.zip` (the bare saver); `--zip` also makes `dist/Matrix-<version>.zip` |
 | `make-thumbnail.swift`, `make-dmg-background.swift`, `Artwork/`, `Resources/` | Thumbnail and DMG artwork |
 | `Tools/render-test.sh` | Renders the saver to a PNG without System Settings (see Testing) |
 | `Tools/feed-test.sh`, `Tools/feed-test/` | Log feed tests, no network needed (see Testing) |
@@ -34,7 +34,7 @@ when Troy asks.
 ```bash
 ./build.sh             # build only (wipes build/)
 ./build.sh --install   # build, copy to ~/Library/Screen Savers, restart the saver host
-./make-dmg.sh          # build + dist/Matrix-<CFBundleShortVersionString>.dmg
+./make-dmg.sh          # build + dist/Matrix-<CFBundleShortVersionString>.dmg + dist/matrix.zip
 ./make-dmg.sh --zip    # also dist/Matrix-<version>.zip (folder with saver + Instructions.txt)
 Tools/render-test.sh   # render test, see below
 Tools/feed-test.sh     # log feed tests (133 checks, ~1 min with compile); FILTER=<group> for some
@@ -208,6 +208,10 @@ protection). To change the installed saver's settings, ask Troy to use Options.
 3. `./make-dmg.sh --zip` (a Finder window opens and closes). The zip is made with
    `ditto -c -k --norsrc --keepParent`: `ditto` keeps the bundle exact so the signature verifies;
    `--norsrc` drops this Mac's xattrs (`com.apple.provenance`/`macl`), which became `._` files.
+   Every run also makes `dist/matrix.zip`, just `Matrix.saver`, with Troy's command
+   `ditto -c -k --sequesterRsrc --keepParent Matrix.saver matrix.zip` (run in `build/`). It keeps
+   the xattrs in `__MACOSX` (Archive Utility restores them; other unzippers show the folder).
+   The signature verifies after `ditto -x -k`. It's for Troy's own use, not for the GitHub release.
 4. Check: `hdiutil verify`, mount read-only, version in the mounted `Info.plist`, binary matches
    `build/`, `codesign -v`; unzip the zip (`ditto -x -k`) and `codesign -v` it too. Then
    `./build.sh --install`.
@@ -307,7 +311,7 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
 - **2.13** (2026-11-17, was 3.16): **lighter rain on battery** and **services split across
   displays** (see How it works). Feed tests 133 pass; Effects and Logs tabs rendered; battery
   tested by forcing it in a scratch copy. Can't be checked live on this Mac: it has one display
-  (S34C65xU) and no battery. Installed on Troy's Mac (as 3.16 until rebuilt).
+  (S34C65xU) and no battery. Installed on Troy's Mac.
 
 Ideas not done (suggested 2026-11-15; Troy's picks, fold repeats, quiet-service alert
 and the test script, are all done):
@@ -315,6 +319,11 @@ and the test script, are all done):
 - Stats under the clock: errors in the last hour, lines per minute.
 - Errors/warnings only; dim the start-fetch backlog; Grafana/Alertmanager alerts; Loki
   `/tail` WebSocket instead of polling.
+- Grafana alerts (looked at 2026-11-19, set aside): Grafana 13.3.1 at `http://10.1.1.11:3000`;
+  its alert APIs (`/api/prometheus/grafana/api/v1/alerts`, `/api/alertmanager/grafana/api/v2/alerts`)
+  return 401 without auth. Alert state history isn't in Loki and ngalert doesn't log state changes
+  at info. Routes: a Viewer service account token in prefs, or `[unified_alerting.state_history]`
+  with `backend = loki` in grafana.ini so the saver reads it from Loki.
 - Missed: lines written to a log between the last poll and a rename (would need the file kept open).
 - Loki basic auth / API token (would be stored in plain text in prefs).
 - Optional "colour the whole line" for keywords.

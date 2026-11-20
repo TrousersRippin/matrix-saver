@@ -2,7 +2,7 @@
 # Builds Matrix.saver and packages it into dist/Matrix-<version>.dmg, with a styled
 # Finder window and Instructions.txt. Finder may ask for permission to be automated.
 # --zip also makes dist/Matrix-<version>.zip (a Matrix-<version> folder with the saver and
-# Instructions.txt), for sites that don't accept DMGs.
+# Instructions.txt), for sites that don't accept DMGs. dist/matrix.zip (the bare saver) is always made.
 set -euo pipefail
 cd "${0:A:h}"
 
@@ -83,6 +83,12 @@ trap - EXIT
 hdiutil convert -quiet -ov "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 rm -rf "$WORK"
 echo "Built $DMG"
+
+# Always: dist/matrix.zip, the bare saver bundle. ditto, not zip, so the code signature still
+# verifies once unzipped; --sequesterRsrc keeps extended attributes in __MACOSX.
+rm -f dist/matrix.zip
+(cd build && ditto -c -k --sequesterRsrc --keepParent Matrix.saver ../dist/matrix.zip)
+echo "Built dist/matrix.zip"
 
 if (( ZIP )); then
   # ditto, not zip: it copies the bundle exactly (structure, permissions), so the code signature
