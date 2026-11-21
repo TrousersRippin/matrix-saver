@@ -64,6 +64,7 @@ private struct Settings: Equatable {
     var errorBanner = true  // log mode: each new error line is written across the screen
     var quietAlerts = true  // log mode (Loki): a banner when Loki or a steady service goes quiet
     var splitDisplays = true // log mode (Loki): each display shows its own share of the services
+    var serviceShades = true // log mode (Loki): each service rains in its own shade of the rain colour
     var logSource = 0   // 0: a file, 1: a Loki server
     var lokiURL = ""
     var lokiQuery = Settings.defaultLokiQuery
@@ -90,7 +91,7 @@ private struct Settings: Equatable {
         let base = Settings()
         d.register(defaults: ["colorIndex": base.colorIndex, "customHue": base.customHue, "speed": base.speed,
                               "density": base.density, "size": base.size, "charset": base.charset,
-                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "errorBanner": base.errorBanner, "quietAlerts": base.quietAlerts, "splitDisplays": base.splitDisplays, "logSource": base.logSource, "lokiURL": base.lokiURL,
+                              "customChars": base.customChars, "logPath": base.logPath, "keywords": base.keywords, "levelColors": base.levelColors, "followVolume": base.followVolume, "errorRipple": base.errorRipple, "errorBanner": base.errorBanner, "quietAlerts": base.quietAlerts, "splitDisplays": base.splitDisplays, "serviceShades": base.serviceShades, "logSource": base.logSource, "lokiURL": base.lokiURL,
                               "lokiQuery": base.lokiQuery, "depth": base.depth, "glow": base.glow,
                               "crt": base.crt, "glitches": base.glitches, "fps": base.fps,
                               "mainDisplayOnly": base.mainDisplayOnly, "batteryLight": base.batteryLight, "clock": base.clock, "intro": base.intro,
@@ -112,6 +113,7 @@ private struct Settings: Equatable {
         s.errorBanner = d.bool(forKey: "errorBanner")
         s.quietAlerts = d.bool(forKey: "quietAlerts")
         s.splitDisplays = d.bool(forKey: "splitDisplays")
+        s.serviceShades = d.bool(forKey: "serviceShades")
         s.logSource = d.integer(forKey: "logSource").clamped(to: 0...1)
         s.lokiURL = d.string(forKey: "lokiURL") ?? base.lokiURL
         s.lokiQuery = d.string(forKey: "lokiQuery") ?? base.lokiQuery
@@ -155,6 +157,7 @@ private struct Settings: Equatable {
         d.set(errorBanner, forKey: "errorBanner")
         d.set(quietAlerts, forKey: "quietAlerts")
         d.set(splitDisplays, forKey: "splitDisplays")
+        d.set(serviceShades, forKey: "serviceShades")
         d.set(logSource, forKey: "logSource")
         d.set(lokiURL, forKey: "lokiURL")
         d.set(lokiQuery, forKey: "lokiQuery")
@@ -219,7 +222,37 @@ private struct Settings: Equatable {
         let white = CGColor(gray: 1, alpha: 1)
         let red = reddish ? white : CGColor(srgbRed: 1, green: 0.22, blue: 0.18, alpha: 1)
         let amber = amberish ? white : CGColor(srgbRed: 1, green: 0.68, blue: 0.1, alpha: 1)
-        return [nil, red, red, amber, nil, white]
+        let inks: [CGColor?] = [nil, red, red, amber, nil, white]
+        return shadesShown ? inks + shadeColors(cycleHue: cycleHue) : inks
+    }
+
+    /// Shades per service, counting the rain colour itself as shade 0 (see LogFeed.shade(of:)).
+    static let shadeCount = 6
+
+    /// Whether services rain in shades of the rain colour: only for Loki, the one source with
+    /// services.
+    var shadesShown: Bool { serviceShades && charset == Self.logCharset && logSource == 1 }
+
+    /// The colours of shades 1 and up (`Layer.Ink.firstShade` on): the rain's hue moved a little
+    /// either way, or paler. White rain gets pale tints instead. Under Colour Cycle the hue is
+    /// taken in steps of 1/48 (2.5 s), so the shade glyphs are re-rendered only that often.
+    func shadeColors(cycleHue: Double) -> [CGColor] {
+        let tint: NSColor
+        if colorIndex == Self.cycleColorIndex {
+            tint = NSColor(cgColor: Self.color(hue: (cycleHue * 48).rounded() / 48)) ?? .white
+        } else {
+            tint = NSColor(cgColor: self.tint(cycleHue: cycleHue)) ?? .white
+        }
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        tint.usingColorSpace(.sRGB)?.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        let looks: [(h: CGFloat, s: CGFloat)] = s < 0.15
+            ? [(0.33, 0.3), (0.55, 0.3), (0.75, 0.25), (0.12, 0.3), (0.92, 0.25)]  // white: pale tints
+            : [(h - 0.05, s), (h + 0.05, s), (h - 0.1, s * 0.9), (h + 0.1, s * 0.9), (h, s * 0.4)]
+        return looks.map { look in
+            let hue = (look.h + 1).truncatingRemainder(dividingBy: 1)
+            return NSColor(calibratedHue: hue, saturation: look.s, brightness: b, alpha: 1)
+                .usingColorSpace(.sRGB)!.cgColor
+        }
     }
 
     /// The rain's characters, and whether they are mirrored as in the film. Latin, custom and log
@@ -310,6 +343,7 @@ private final class LogFeed {
         var shapes: [Int] = []           // shape(of:) of each line
         var cursor = 0
         var credit = 0.0                 // for taking turns, see nextLine
+        var shade: UInt8 = 0             // its shade of the rain colour, see shade(of:)
     }
     private var sources: [Source] = []
     private var sourceIndex: [String: Int] = [:]
@@ -393,7 +427,7 @@ private final class LogFeed {
     ///
     /// With a `part`, only the sources owned by that display are used (see owner(parts:)); a
     /// display that owns none (more displays than sources) uses them all.
-    func nextLine(part: Part? = nil) -> (text: [UInt16], isNew: Bool) {
+    func nextLine(part: Part? = nil) -> (text: [UInt16], isNew: Bool, shade: UInt8) {
         var mine: (Int) -> Bool = { _ in true }
         if let part, part.count > 1 {
             let owner = owner(parts: part.count)
@@ -401,16 +435,17 @@ private final class LogFeed {
         }
         if let part, part.count > 1 {
             if let i = fresh.firstIndex(where: { $0.error ? !$0.taken.contains(part.index) : mine($0.source) }) {
-                let text = fresh[i].text
+                let text = fresh[i].text, shade = shade(ofSource: fresh[i].source)
                 if fresh[i].error {
                     fresh[i].taken.insert(part.index)
-                    if fresh[i].taken.count < part.count { return (text, true) }
+                    if fresh[i].taken.count < part.count { return (text, true, shade) }
                 }
                 fresh.remove(at: i)
-                return (text, true)
+                return (text, true, shade)
             }
         } else if !fresh.isEmpty {
-            return (fresh.removeFirst().text, true)
+            let f = fresh.removeFirst()
+            return (f.text, true, shade(ofSource: f.source))
         }
         var total = 0.0
         var best = -1
@@ -420,11 +455,25 @@ private final class LogFeed {
             sources[i].credit += w
             if best < 0 || sources[i].credit > sources[best].credit { best = i }
         }
-        guard best >= 0 else { return ([], false) }
+        guard best >= 0 else { return ([], false, 0) }
         sources[best].credit -= total
         if sources[best].cursor >= sources[best].lines.count { sources[best].cursor = 0 }
         defer { sources[best].cursor += 1 }
-        return (sources[best].lines[sources[best].cursor], false)
+        return (sources[best].lines[sources[best].cursor], false, sources[best].shade)
+    }
+
+    private func shade(ofSource i: Int) -> UInt8 {
+        sources.indices.contains(i) ? sources[i].shade : 0
+    }
+
+    /// The shade a source rains in (0 is the rain colour itself, see Settings.shadeColors), from
+    /// a hash of its name (FNV-1a), so a service keeps its shade across restarts and displays.
+    /// A file's one source ("") gets the rain colour.
+    static func shade(of name: String) -> UInt8 {
+        guard !name.isEmpty else { return 0 }
+        var h: UInt32 = 2_166_136_261
+        for byte in name.utf8 { h = (h ^ UInt32(byte)) &* 16_777_619 }
+        return UInt8(h % UInt32(Settings.shadeCount))
     }
 
     /// Which display shows each source, when the sources are split across `parts` displays.
@@ -470,7 +519,7 @@ private final class LogFeed {
             i = j
         } else {
             i = sources.count
-            sources.append(Source())
+            sources.append(Source(shade: Self.shade(of: key)))
             sourceIndex[key] = i
         }
         // The incoming lines, each shape once (its newest line).
@@ -1225,7 +1274,9 @@ private final class Layer {
         static let warn: UInt8 = 3
         static let debug: UInt8 = 4        // tinted, but dim
         static let keywordOnError: UInt8 = 5
+        static let firstShade: UInt8 = 6   // plain text in shade 1 of the rain colour; shade k is firstShade + k - 1
         static func coloured(_ ink: UInt8) -> Bool { ink != plain && ink != debug }
+        static func isShade(_ ink: UInt8) -> Bool { ink >= firstShade }
     }
 
     struct Drop {
@@ -1238,6 +1289,7 @@ private final class Layer {
         var startRow = 0         // log mode: row the text starts at, so columns don't line up
         var idle = false         // parked while the log is quiet (see Layer.active)
         var ripple = false       // log mode: a new error line; ripples (and banners) when it starts to show
+        var shade: UInt8 = 0     // log mode: its service's shade of the rain colour (0: the colour itself)
     }
 
     let alpha: CGFloat
@@ -1259,6 +1311,7 @@ private final class Layer {
     var randomGlyphs: UInt16 = 1  // glyphs the rain may pick; message letters follow these
     var feed: LogFeed?            // set in log mode: drops spell its lines instead of random glyphs
     var part: LogFeed.Part?       // log mode: this display's share of the services, if split
+    var shades = false            // log mode: plain text in its service's shade (Settings.shadesShown)
 
     var trailGlyphs: [CGImage] = []  // white, soft glow; tinted with the frame
     var headGlyphs: [CGImage] = []   // white, full glow; tinted with the frame
@@ -1286,6 +1339,7 @@ private final class Layer {
             let line = feed.nextLine(part: part)
             d.text = line.text
             d.ripple = line.isNew && LogFeed.level(of: line.text) == .error
+            d.shade = shades ? line.shade : 0
             d.startRow = Int.random(in: 0...(rows / 3))
         }
         return d
@@ -1318,7 +1372,8 @@ private final class Layer {
                     guard drops[i].pos < drops[i].text.count else { drops[i].lastRow = rows + 4; break }
                     let v = drops[i].text[drops[i].pos]
                     chars[idx] = v & LogFeed.glyphBits
-                    ink[idx] = LogFeed.ink(v, levels: feed?.levels ?? false)
+                    let k = LogFeed.ink(v, levels: feed?.levels ?? false)
+                    ink[idx] = k == Ink.plain && drops[i].shade > 0 ? Ink.firstShade + drops[i].shade - 1 : k
                     if drops[i].ripple {
                         drops[i].ripple = false
                         newErrors.append((drops[i].col, r, drops[i].text))
@@ -1554,6 +1609,7 @@ final class MatrixView: ScreenSaverView {
         layers = planes.enumerated().map { i, plane in
             let layer = Layer(alpha: plane.alpha, speedScale: plane.speed)
             layer.feed = logFeed
+            layer.shades = logFeed != nil && settings.shadesShown
             let font = max(3, (fontSize * plane.font).rounded())
             layer.cellW = (font * 0.72).rounded()
             layer.cellH = (font * 1.08).rounded()
@@ -1594,7 +1650,8 @@ final class MatrixView: ScreenSaverView {
         }
         glyphScale = scale
         inkTint = nil
-        if logFeed != nil, !settings.keywordList.isEmpty || settings.levelColors || settings.errorBanner || settings.quietAlerts { renderInkGlyphs() }
+        if logFeed != nil, !settings.keywordList.isEmpty || settings.levelColors || settings.errorBanner || settings.quietAlerts
+            || settings.shadesShown { renderInkGlyphs() }
 
         // These all hold positions in the old grid.
         message = nil
@@ -1643,20 +1700,42 @@ final class MatrixView: ScreenSaverView {
     /// Renders the glyphs for coloured log text (keywords, error and warning lines). Colour Cycle
     /// calls this again when the hue moves into or out of red or amber. Colours shared by several
     /// inks are rendered once.
-    private func renderInkGlyphs() {
-        let colors = settings.inkColors(cycleHue: cycleHue)
+    /// Service shades (Ink.firstShade on) are rendered like the trail, with a softer glow. A set
+    /// whose colour hasn't changed since the last call is kept. With a `budget`, at most that
+    /// many changed colours are rendered and the rest keep their old glyphs until a later call:
+    /// Colour Cycle renders one per frame (a set for every layer takes ~7 ms at 2560×1440 with
+    /// Depth, all of them ~35 ms), so the shades moving every 2.5 s don't drop a frame.
+    private func renderInkGlyphs(budget: Int = .max) {
+        var colors = settings.inkColors(cycleHue: cycleHue)
+        let old = inkTint ?? []
+        if old.count == colors.count {
+            var left = budget
+            for i in colors.indices where colors[i] != old[i] {
+                if left > 0 { left -= 1 } else { colors[i] = old[i] }
+            }
+        }
         inkTint = colors
         for layer in layers {
-            var done: [(CGColor, [CGImage])] = []
-            layer.inkGlyphs = colors.map { color in
+            let kept = layer.inkGlyphs
+            var done: [(CGColor, Bool, [CGImage])] = []
+            layer.inkGlyphs = colors.enumerated().map { i, color in
                 guard let color else { return [] }
-                if let hit = done.first(where: { $0.0 == color }) { return hit.1 }
+                let shade = Layer.Ink.isShade(UInt8(i))
+                if i < old.count, i < kept.count, old[i] == color, !kept[i].isEmpty { return kept[i] }
+                if let hit = done.first(where: { $0.0 == color && $0.1 == shade }) { return hit.2 }
+                let glow = shade ? Self.scaled(color, 0.8).copy(alpha: 0.7) : color.copy(alpha: 0.8)
                 let glyphs = renderGlyphs(layer.glyphEntries, layer: layer, fontSize: layer.fontSize,
-                                          scale: glyphScale, glow: color.copy(alpha: 0.8), color: color)
-                done.append((color, glyphs))
+                                          scale: glyphScale, glow: glow, color: color)
+                done.append((color, shade, glyphs))
                 return glyphs
             }
         }
+    }
+
+    private static func scaled(_ c: CGColor, _ f: CGFloat) -> CGColor {
+        let rgb = c.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil) ?? c
+        let p = rgb.components ?? [1, 1, 1, 1]
+        return CGColor(srgbRed: p[0] * f, green: p[min(1, p.count - 1)] * f, blue: p[min(2, p.count - 1)] * f, alpha: 1)
     }
 
     /// Scanlines and darkened edges, drawn over each finished frame.
@@ -1717,7 +1796,7 @@ final class MatrixView: ScreenSaverView {
         cycleHue = (cycleHue + Double(dt) / 120).truncatingRemainder(dividingBy: 1)
         if settings.colorIndex == Settings.cycleColorIndex, let tint = inkTint,
            settings.inkColors(cycleHue: cycleHue) != tint {
-            renderInkGlyphs()
+            renderInkGlyphs(budget: 1)
         }
 
         if introActive {
@@ -2169,8 +2248,10 @@ final class MatrixView: ScreenSaverView {
                 if b < 0.02 { continue }
                 // Brighter than the trail around it (which fades as b squared): red reads darker
                 // than green, and keywords should stand out.
-                ctx.setAlpha(CGFloat(min(1, b * 1.5)) * layer.alpha)
-                let glyphs = layer.inkGlyphs[Int(layer.ink[base + c])]
+                // Service shades are plain text, so they fade like the tinted trail.
+                let ink = layer.ink[base + c]
+                ctx.setAlpha((Layer.Ink.isShade(ink) ? CGFloat(b * b) : CGFloat(min(1, b * 1.5))) * layer.alpha)
+                let glyphs = layer.inkGlyphs[Int(ink)]
                 ctx.draw(glyphs[Int(layer.chars[base + c])],
                          in: CGRect(x: CGFloat(c) * layer.cellW - layer.pad + dx, y: y, width: imgW, height: imgH))
             }
@@ -2319,6 +2400,7 @@ private final class OptionsController: NSObject {
     private var bannerCheck: NSButton!
     private var quietCheck: NSButton!
     private var splitCheck: NSButton!
+    private var shadeCheck: NSButton!
     private var logsNote: NSTextField!
 
     private override init() {
@@ -2393,7 +2475,7 @@ private final class OptionsController: NSObject {
             return f
         }
         func newPage() {
-            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 13))
+            let page = FlippedView(frame: NSRect(x: 0, y: margin + rowH * 1.25, width: width, height: rowH * 14))
             content.addSubview(page)
             pages.append(page)
             parent = page
@@ -2486,15 +2568,16 @@ private final class OptionsController: NSObject {
         keywordsField = textField(row: 5, x: controlX, width: wideW)
         keywordsField.placeholderString = "Shown in red; separate with commas"
         levelCheck = checkbox("Colour lines by log level", row: 6, x: controlX)
-        volumeCheck = checkbox("More rain when logs are busy", row: 7, x: controlX)
-        rippleCheck = checkbox("Ripple when an error arrives", row: 8, x: controlX)
-        bannerCheck = checkbox("Write new errors across the screen", row: 9, x: controlX)
-        quietCheck = checkbox("Warn when logging goes quiet", row: 10, x: controlX)
-        splitCheck = checkbox("Split services across displays", row: 11, x: controlX)
+        shadeCheck = checkbox("Shade the rain by service", row: 7, x: controlX)
+        volumeCheck = checkbox("More rain when logs are busy", row: 8, x: controlX)
+        rippleCheck = checkbox("Ripple when an error arrives", row: 9, x: controlX)
+        bannerCheck = checkbox("Write new errors across the screen", row: 10, x: controlX)
+        quietCheck = checkbox("Warn when logging goes quiet", row: 11, x: controlX)
+        splitCheck = checkbox("Split services across displays", row: 12, x: controlX)
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 12 * rowH + 2, width: wideW, height: rowH * 1.5)
+        logsNote.frame = NSRect(x: controlX, y: 13 * rowH + 2, width: wideW, height: rowH * 1.5)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }
@@ -2502,7 +2585,7 @@ private final class OptionsController: NSObject {
         originY = margin
 
         // Credit line. Bundle.main is the host process here, so look up the saver's own bundle.
-        let creditRow: CGFloat = 14.35
+        let creditRow: CGFloat = 15.35
         let version = Bundle(for: OptionsController.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let credit = NSTextField(labelWithString: "Version \(version) · Agent Smith")
         credit.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -2584,6 +2667,7 @@ private final class OptionsController: NSObject {
         bannerCheck.state = s.errorBanner ? .on : .off
         quietCheck.state = s.quietAlerts ? .on : .off
         splitCheck.state = s.splitDisplays ? .on : .off
+        shadeCheck.state = s.serviceShades ? .on : .off
         controlsChanged()
     }
 
@@ -2618,6 +2702,7 @@ private final class OptionsController: NSObject {
         rippleCheck.isEnabled = logs
         bannerCheck.isEnabled = logs
         quietCheck.isEnabled = logs && loki
+        shadeCheck.isEnabled = logs && loki
         splitCheck.isEnabled = logs && loki && displayPopup.indexOfSelectedItem == 0
         logsNote.stringValue = logs
             ? (loki ? "Tick services, or type any LogQL query. Shows its last day of lines, then new ones as they arrive."
@@ -2777,6 +2862,7 @@ private final class OptionsController: NSObject {
         s.errorBanner = bannerCheck.state == .on
         s.quietAlerts = quietCheck.state == .on
         s.splitDisplays = splitCheck.state == .on
+        s.serviceShades = shadeCheck.state == .on
         s.save()
         // Update the preview (and any other instance in this process) straight away.
         NotificationCenter.default.post(name: .matrixOptionsChanged, object: nil)

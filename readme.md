@@ -7,7 +7,7 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 
 - Native macOS screen saver (`Matrix.saver`), written in Swift with Core Graphics. No dependencies.
 - Apple silicon (M1 or later), macOS 13 or newer.
-- Current version: **2.13**.
+- Current version: **2.14**.
 
 ## Features
 
@@ -44,6 +44,8 @@ files**, or live logs from a **Loki** server, with error keywords picked out in 
 - **Keywords** such as `error, fail, denied, fatal` are shown in red (white on red rain).
 - **Log levels:** error lines are red, warnings amber and debug lines dimmed. The level comes from
   the line (`level=error`, `ERR`, `[warn]`, `WARNING:`, a CEF severity) or from Loki's labels.
+- **Service shades** (Loki): each service rains in one of six shades of the rain colour, always
+  the same one, so you can tell services apart at a glance. Errors and warnings keep their colours.
 - **Volume:** the rain thickens when lines arrive faster than usual (up to 2.5×) and thins when
   the log goes quiet (down to half), so a burst of activity shows as a downpour.
 - **Error ripple:** a new error line sends a ring spreading across the rain from where it starts.
@@ -123,7 +125,7 @@ Notes:
 To release, set the version in `Info.plist`, then run `./make-dmg.sh`:
 
 ```bash
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.13' -c 'Set :CFBundleVersion 16' Info.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.14' -c 'Set :CFBundleVersion 17' Info.plist
 ```
 
 ### Render test
@@ -190,6 +192,7 @@ CLAUDE.md                   working notes for Claude Code
 
 | Version | Changes |
 |---|---|
+| 2.14 | Loki: each service rains in its own shade of the rain colour |
 | 2.13 | Lighter rain on battery; Loki services split across displays |
 | 2.12 | Error banners are shorter: the level, process ids and noise fields go, and the message comes first |
 | 2.11 | Loki: a banner when Loki can't be reached or a steady service goes quiet, and when it's back |

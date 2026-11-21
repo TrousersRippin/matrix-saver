@@ -54,6 +54,7 @@ func runFeedTests(scratch: String) -> Bool {
         ("banner", LogFeed.testBanner),
         ("fair share", LogFeed.testFairShare),
         ("displays", LogFeed.testDisplays),
+        ("shades", LogFeed.testShades),
         ("volume", LogFeed.testVolume),
         ("file", { LogFeed.testFile(scratch) }),
         ("loki", LogFeed.testLoki),
@@ -320,6 +321,53 @@ extension LogFeed {
         f.store([f.encode("only one", level: .normal)], in: "only")
         let lone = f.nextLine(part: (1, 2))
         expectEqual(text(lone.text), "only one", "a display with no sources shows them all")
+    }
+
+    // MARK: Shades
+
+    static func testShades() {
+        expectEqual(shade(of: ""), 0, "a file's source has the rain colour")
+        let names = ["unifi-siem", "loki", "grafana", "postgres", "seerr", "ghost", "gatus", "traefik",
+                     "alloy", "sonarr", "radarr", "prowlarr", "jellyfin", "immich", "homepage", "dns-cache-db"]
+        let shades = names.map { shade(of: $0) }
+        check(shades.allSatisfy { $0 < UInt8(Settings.shadeCount) }, "shades in range", "\(shades)")
+        expectEqual(names.map { shade(of: $0) }, shades, "same name, same shade")
+        check(Set(shades).count >= 5, "services spread over the shades", "\(shades)")
+
+        let f = LogFeed(source: .file("/nonexistent/feed-test"), keywords: [], levels: true)
+        f.clearSources()
+        f.store([f.encode("grafana old line", level: .normal)], in: "grafana")
+        f.store([f.encode("loki old line", level: .normal)], in: "loki")
+        var got: [String: UInt8] = [:]
+        for _ in 0..<4 { let l = f.nextLine(); got[String(text(l.text).prefix { $0 != " " })] = l.shade }
+        expectEqual(got, ["grafana": shade(of: "grafana"), "loki": shade(of: "loki")], "history lines carry their shade")
+        f.append([("loki", f.encode("loki brand new", level: .normal))])
+        let new = f.nextLine()
+        check(new.isNew && new.shade == shade(of: "loki"), "new lines carry their shade")
+        let split = (0..<2).map { _ in f.nextLine(part: (0, 2)) }
+        check(split.allSatisfy { $0.shade == shade(of: String(text($0.text).prefix { $0 != " " })) },
+              "split displays: lines carry their shade")
+
+        var s = Settings()
+        s.charset = Settings.logCharset
+        expectEqual(s.shadesShown, false, "no shades for a file")
+        s.logSource = 1
+        expectEqual(s.shadesShown, true, "shades for Loki")
+        expectEqual(s.inkColors(cycleHue: 0).count, Int(Layer.Ink.firstShade) + Settings.shadeCount - 1,
+                    "an ink colour per shade")
+        for index in 0..<Settings.cycleColorIndex + 1 {
+            s.colorIndex = index
+            let rgb = s.shadeColors(cycleHue: 0.37).map { c -> [CGFloat] in
+                Array(c.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil)!
+                    .components!.prefix(3)) }
+            let distinct = Set(rgb.map { $0.map { Int(($0 * 20).rounded()) } }).count
+            check(distinct == rgb.count, "colour \(index): shades differ", "\(rgb)")
+        }
+        s.colorIndex = Settings.cycleColorIndex
+        expectEqual(s.shadeColors(cycleHue: 0.370), s.shadeColors(cycleHue: 0.372),
+                    "colour cycle: shades move in steps")
+        s.serviceShades = false
+        expectEqual(s.inkColors(cycleHue: 0).count, Int(Layer.Ink.firstShade), "off: no shade colours")
     }
 
     // MARK: Volume

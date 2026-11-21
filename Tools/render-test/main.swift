@@ -27,6 +27,7 @@ d.set(false, forKey: "glitches")
 d.set(false, forKey: "messages")
 d.set(false, forKey: "depth")
 d.set(Int(env["COLOR"] ?? "0") ?? 0, forKey: "colorIndex")  // 4 = Red
+d.set(env["SHADES"] != "0", forKey: "serviceShades")  // SHADES=0: one colour for every service
 d.synchronize()
 
 let v = MatrixView(frame: NSRect(x: 0, y: 0, width: 1440, height: 900), isPreview: false)!

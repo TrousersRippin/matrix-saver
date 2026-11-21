@@ -37,7 +37,7 @@ when Troy asks.
 ./make-dmg.sh          # build + dist/Matrix-<CFBundleShortVersionString>.dmg + dist/matrix.zip
 ./make-dmg.sh --zip    # also dist/Matrix-<version>.zip (folder with saver + Instructions.txt)
 Tools/render-test.sh   # render test, see below
-Tools/feed-test.sh     # log feed tests (133 checks, ~1 min with compile); FILTER=<group> for some
+Tools/feed-test.sh     # log feed tests (154 checks, ~1 min with compile); FILTER=<group> for some
 ```
 
 ## How it works
@@ -136,6 +136,18 @@ Tools/feed-test.sh     # log feed tests (133 checks, ~1 min with compile); FILTE
     A display that owns none uses all. `fresh` entries carry their source: a new line waits for
     its own display; a new **error** line goes to every display (`taken`), so ripples and
     banners show everywhere. Alerts are per view as before.
+  - **Service shades** (`Settings.serviceShades`, Logs tab "Shade the rain by service", default
+    on, Loki only: `Settings.shadesShown`): each source has a `shade` 0-5 from an FNV-1a hash of
+    its name (`LogFeed.shade(of:)`, stable across restarts and displays; a file's "" is 0).
+    `nextLine` returns it, `Drop.shade` carries it, and a plain cell gets ink
+    `Layer.Ink.firstShade + shade - 1` (shade 0 stays plain and tinted). `Settings.shadeColors`
+    gives shades 1-5: rain hue ±0.05, ±0.1 (saturation 0.9×), and paler (0.4× saturation);
+    white rain gets pale tints. They are appended to `inkColors`, rendered by
+    `renderInkGlyphs` with the trail's softer glow and drawn in `drawInk` at the trail's b²
+    alpha, so shade 0 and the tinted rain look the same. Levels, keywords, ripples and banners
+    override the shade. Under Colour Cycle the shade hue moves in 1/48 steps (2.5 s) and
+    `renderInkGlyphs(budget: 1)` renders one changed colour per frame (~7 ms at 2560×1440 with
+    Depth; all at once was ~35 ms, a dropped frame). Unchanged sets are kept.
 - **Battery** (`Settings.batteryLight`, Effects tab "Lighter rain on battery", default on):
   `checkPower` every 5 s (IOKit `IOPSGetProvidingPowerSourceType`); on battery each
   `Layer.active` is × `batteryShare` (0.5, drops park when they finish falling, as for volume)
@@ -147,7 +159,7 @@ Tools/feed-test.sh     # log feed tests (133 checks, ~1 min with compile); FILTE
   exception that freezes the sheet. The controller is independent of any view because System
   Settings drops the view while the sheet is open.
   - Logs tab: Source (file / Loki), Log file, Loki URL, **Services** (pull-down of checkboxes;
-    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "More rain when logs are busy", "Ripple when an error arrives", "Write new errors across the screen", "Warn when logging goes quiet" (Loki only), "Split services across displays" (Loki only). Pages are 13 rows. Services fetches
+    checkbox views in menu items keep the menu open), Query, Keywords, "Colour lines by log level", "Shade the rain by service" (Loki only), "More rain when logs are busy", "Ripple when an error arrives", "Write new errors across the screen", "Warn when logging goes quiet" (Loki only), "Split services across displays" (Loki only). Pages are 14 rows (13 until 2.14). Services fetches
     `/loki/api/v1/label/service_name/values` for the last 7 days and writes
     `{service_name=~"a|b"}` into Query. Any other query shows as "Custom query".
   - Migration in `Settings.load()`: an `http(s)://` in `logPath` (from a test build) moves to
@@ -172,14 +184,14 @@ protection). To change the installed saver's settings, ask Troy to use Options.
   static funcs in an `extension LogFeed` and can use its private members (e.g. `pollFile`,
   `fetchLoki`, `fresh`, `lokiDownSince`) and its private init (no shared instance). Loki is faked
   with a `URLProtocol` (`FakeLoki`, host `fake-loki.test`, `handler` gives status + JSON, and
-  `requests` records the URLs). Groups: cleanup, levels, keywords, shape, fair share, volume,
+  `requests` records the URLs). Groups: cleanup, levels, keywords, shape, fair share, shades, volume,
   displays (split, stable owners, new lines to their display, errors to all), file (tail, big
   append, rename/inode/truncate rotation, folding, empty/missing), loki (start,
   overlap/late/repeat, quiet check, down/back, unreachable at start), loki start rounds, quiet
   rules. Checked by breaking three behaviours in a copy: each was caught, exit status 1.
 - `Tools/render-test.sh` compiles `MatrixView.swift` with a small driver and renders frames.
   Settings come from environment variables: `SOURCE` (file or Loki URL), `QUERY`, `DURATION`,
-  `COLOR` (4 = Red), `OUT`, `SHEET` + `TAB` (Options tab to PNG), `MENU=1` (drive the Services
+  `COLOR` (4 = Red, 8 = Cycle), `SHADES=0` (service shades off), `OUT`, `SHEET` + `TAB` (Options tab to PNG), `MENU=1` (drive the Services
   menu). Look at the PNGs. It is **not sandboxed**, so it can't prove sandbox behaviour. It deletes
   its ByHost prefs afterwards. Output goes in `build/`, which `build.sh` wipes.
 - **In the real host:** after `./build.sh --install`, open
@@ -312,10 +324,13 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   displays** (see How it works). Feed tests 133 pass; Effects and Logs tabs rendered; battery
   tested by forcing it in a scratch copy. Can't be checked live on this Mac: it has one display
   (S34C65xU) and no battery. Installed on Troy's Mac.
+- **2.14** (2026-11-21): **service shades** (see Logs mode). Feed tests 154 pass (21 new in
+  "shades"); renders against the home Loki with all services in green, blue, white and Colour
+  Cycle (2560×1440, Depth) and the Logs tab. The orange columns seen in the green render were
+  real WRN lines (gotify, netbootxyz). Options pages grew to 14 rows. Installed on Troy's Mac.
 
-Ideas not done (suggested 2026-11-15; Troy's picks, fold repeats, quiet-service alert
-and the test script, are all done):
-- A shade of the rain colour per service.
+Ideas not done (suggested 2026-11-15; Troy's picks, fold repeats, quiet-service alert,
+the test script and service shades, are all done):
 - Stats under the clock: errors in the last hour, lines per minute.
 - Errors/warnings only; dim the start-fetch backlog; Grafana/Alertmanager alerts; Loki
   `/tail` WebSocket instead of polling.
