@@ -229,8 +229,8 @@ protection). To change the installed saver's settings, ask Troy to use Options.
    `./build.sh --install`.
 5. When Troy asks: commit, push, then `gh release create vX.Y dist/Matrix-X.Y.dmg dist/Matrix-X.Y.zip --target main
    --title "Matrix X.Y" --notes-file <notes>` (`--target` needs a branch or full SHA, not a short
-   one). Tag each release on its version commit. Since the renumbering, GitHub has one release,
-   v2.13; the older versions have tags only.
+   one). Tag each release on its version commit. Since the renumbering, GitHub has releases
+   v2.13 and v2.14 (2026-11-21); the older versions have tags only.
 
 ## Troy's preferences
 
