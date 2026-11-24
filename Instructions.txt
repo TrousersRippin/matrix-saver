@@ -93,7 +93,8 @@ Logs (when Characters is set to Logs)
               rain colour (a little bluer, yellower or paler), so lines
               from the same service look alike. A service keeps its
               shade; with many services, some share one. Errors and
-              warnings keep their red and amber
+              warnings keep their red and amber, and no shade looks
+              like them. With Depth, only the nearest layer is shaded
   More rain when logs are busy
               The rain thickens (up to 2.5x) when lines arrive faster
               than usual and thins (down to half) when the log is

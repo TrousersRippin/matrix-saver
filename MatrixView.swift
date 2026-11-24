@@ -215,15 +215,23 @@ private struct Settings: Equatable {
     /// near that colour (including while Colour Cycle passes through it). Keywords on an error line
     /// are white so they still stand out.
     func inkColors(cycleHue: Double) -> [CGColor?] {
-        let hue: Double? = colorIndex == Self.customColorIndex ? customHue
-            : colorIndex == Self.cycleColorIndex ? cycleHue : nil
-        let reddish = colorIndex == 4 || hue.map { $0 < 0.06 || $0 > 0.94 } == true
-        let amberish = colorIndex == 5 || hue.map { $0 >= 0.06 && $0 < 0.18 } == true
+        let (reddish, amberish) = rainNear(cycleHue: cycleHue)
         let white = CGColor(gray: 1, alpha: 1)
         let red = reddish ? white : CGColor(srgbRed: 1, green: 0.22, blue: 0.18, alpha: 1)
         let amber = amberish ? white : CGColor(srgbRed: 1, green: 0.68, blue: 0.1, alpha: 1)
         let inks: [CGColor?] = [nil, red, red, amber, nil, white]
         return shadesShown ? inks + shadeColors(cycleHue: cycleHue) : inks
+    }
+
+    /// The hues where the error and warning inks are red and amber, so rain there shows them white.
+    static func isRed(_ hue: Double) -> Bool { hue < 0.06 || hue > 0.94 }
+    static func isAmber(_ hue: Double) -> Bool { hue >= 0.06 && hue < 0.18 }
+
+    /// Whether the rain is red or amber (the palette's, or a Custom or Cycle hue there).
+    func rainNear(cycleHue: Double) -> (red: Bool, amber: Bool) {
+        let hue: Double? = colorIndex == Self.customColorIndex ? customHue
+            : colorIndex == Self.cycleColorIndex ? cycleHue : nil
+        return (colorIndex == 4 || hue.map(Self.isRed) == true, colorIndex == 5 || hue.map(Self.isAmber) == true)
     }
 
     /// Shades per service, counting the rain colour itself as shade 0 (see LogFeed.shade(of:)).
@@ -236,20 +244,33 @@ private struct Settings: Equatable {
     /// The colours of shades 1 and up (`Layer.Ink.firstShade` on): the rain's hue moved a little
     /// either way, or paler. White rain gets pale tints instead. Under Colour Cycle the hue is
     /// taken in steps of 1/48 (2.5 s), so the shade glyphs are re-rendered only that often.
+    /// A shade must not pass for an error or a warning: one whose hue lands where those inks are
+    /// red or amber (and the rain isn't, which turns them white) is the rain's own hue, darker
+    /// instead (e.g. Red rain's +0.1 would be amber).
+    /// Hues here are calibrated (generic RGB), as Custom and Cycle hues are.
     func shadeColors(cycleHue: Double) -> [CGColor] {
-        let tint: NSColor
-        if colorIndex == Self.cycleColorIndex {
-            tint = NSColor(cgColor: Self.color(hue: (cycleHue * 48).rounded() / 48)) ?? .white
-        } else {
-            tint = NSColor(cgColor: self.tint(cycleHue: cycleHue)) ?? .white
-        }
+        let cycle = (cycleHue * 48).rounded() / 48
+        let tint = NSColor(cgColor: self.tint(cycleHue: cycle)) ?? .white
         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        tint.usingColorSpace(.sRGB)?.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-        let looks: [(h: CGFloat, s: CGFloat)] = s < 0.15
-            ? [(0.33, 0.3), (0.55, 0.3), (0.75, 0.25), (0.12, 0.3), (0.92, 0.25)]  // white: pale tints
-            : [(h - 0.05, s), (h + 0.05, s), (h - 0.1, s * 0.9), (h + 0.1, s * 0.9), (h, s * 0.4)]
+        tint.usingColorSpace(.genericRGB)?.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        // Custom and Cycle colours are made from a hue: use it exactly (the round trip drifts).
+        if colorIndex == Self.customColorIndex { h = CGFloat(customHue) }
+        if colorIndex == Self.cycleColorIndex { h = CGFloat(cycle) }
+        if s < 0.15 {  // white: pale tints, none near red or amber
+            return [(0.3, 0.3), (0.5, 0.3), (0.65, 0.3), (0.8, 0.25), (0.9, 0.2)].map {
+                NSColor(calibratedHue: $0.0, saturation: $0.1, brightness: b, alpha: 1).usingColorSpace(.sRGB)!.cgColor
+            }
+        }
+        let (reddish, amberish) = rainNear(cycleHue: cycle)
+        var darker: [(s: CGFloat, b: CGFloat)] = [(s, b * 0.7), (s * 0.65, b * 0.8), (s * 0.8, b * 0.55)]
+        let looks: [(h: CGFloat, s: CGFloat)] =
+            [(h - 0.05, s), (h + 0.05, s), (h - 0.1, s * 0.9), (h + 0.1, s * 0.9), (h, s * 0.4)]
         return looks.map { look in
             let hue = (look.h + 1).truncatingRemainder(dividingBy: 1)
+            if (Self.isRed(Double(hue)) && !reddish) || (Self.isAmber(Double(hue)) && !amberish) {
+                let d = darker.removeFirst()  // at most 3 of the 5 can clash
+                return NSColor(calibratedHue: h, saturation: d.s, brightness: d.b, alpha: 1).usingColorSpace(.sRGB)!.cgColor
+            }
             return NSColor(calibratedHue: hue, saturation: look.s, brightness: b, alpha: 1)
                 .usingColorSpace(.sRGB)!.cgColor
         }
@@ -1609,7 +1630,9 @@ final class MatrixView: ScreenSaverView {
         layers = planes.enumerated().map { i, plane in
             let layer = Layer(alpha: plane.alpha, speedScale: plane.speed)
             layer.feed = logFeed
-            layer.shades = logFeed != nil && settings.shadesShown
+            // Front layer only: inks are drawn after the tint, on top of every layer, so a back
+            // layer's shaded text would cover the front layer, the clock and the banner.
+            layer.shades = logFeed != nil && settings.shadesShown && i == planes.count - 1
             let font = max(3, (fontSize * plane.font).rounded())
             layer.cellW = (font * 0.72).rounded()
             layer.cellH = (font * 1.08).rounded()
@@ -1719,8 +1742,8 @@ final class MatrixView: ScreenSaverView {
             let kept = layer.inkGlyphs
             var done: [(CGColor, Bool, [CGImage])] = []
             layer.inkGlyphs = colors.enumerated().map { i, color in
-                guard let color else { return [] }
                 let shade = Layer.Ink.isShade(UInt8(i))
+                guard let color, !shade || layer.shades else { return [] }
                 if i < old.count, i < kept.count, old[i] == color, !kept[i].isEmpty { return kept[i] }
                 if let hit = done.first(where: { $0.0 == color && $0.1 == shade }) { return hit.2 }
                 let glow = shade ? Self.scaled(color, 0.8).copy(alpha: 0.7) : color.copy(alpha: 0.8)
@@ -1873,7 +1896,10 @@ final class MatrixView: ScreenSaverView {
                         let idx = base + c
                         guard b > layer.bright[idx] else { continue }
                         layer.bright[idx] = b
-                        if layer.ink[idx] != Layer.Ink.keyword && layer.ink[idx] != Layer.Ink.keywordOnError {
+                        // Keywords stay; with level colours off the ring is plain, so shades stay too.
+                        let old = layer.ink[idx]
+                        if old != Layer.Ink.keyword && old != Layer.Ink.keywordOnError
+                            && !(ink == Layer.Ink.plain && Layer.Ink.isShade(old)) {
                             layer.ink[idx] = ink
                         }
                     }
@@ -2577,7 +2603,7 @@ private final class OptionsController: NSObject {
         logsNote = NSTextField(wrappingLabelWithString: "")
         logsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         logsNote.textColor = .secondaryLabelColor
-        logsNote.frame = NSRect(x: controlX, y: 13 * rowH + 2, width: wideW, height: rowH * 1.5)
+        logsNote.frame = NSRect(x: controlX, y: 13 * rowH + 2, width: wideW, height: rowH - 2)
         parent.addSubview(logsNote)
 
         for page in pages.dropFirst() { page.isHidden = true }

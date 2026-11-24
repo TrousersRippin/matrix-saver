@@ -7,6 +7,7 @@
 #   SOURCE=http://10.1.1.11:3100 SHEET=build/logs-tab.png TAB=3 Tools/render-test.sh
 #   SOURCE=http://10.1.1.11:3100 MENU=1 Tools/render-test.sh     # drive the Services menu
 #   SOURCE=http://10.1.1.11:3100 SHADES=0 Tools/render-test.sh   # every service in the rain colour
+#   SOURCE=http://10.1.1.11:3100 DEPTH=1 Tools/render-test.sh    # with Depth (three layers)
 set -euo pipefail
 cd "${0:A:h}/.."
 

@@ -25,7 +25,7 @@ if source.hasPrefix("http://") || source.hasPrefix("https://") {
 d.set(false, forKey: "intro")
 d.set(false, forKey: "glitches")
 d.set(false, forKey: "messages")
-d.set(false, forKey: "depth")
+d.set(env["DEPTH"] == "1", forKey: "depth")  // DEPTH=1: three layers
 d.set(Int(env["COLOR"] ?? "0") ?? 0, forKey: "colorIndex")  // 4 = Red
 d.set(env["SHADES"] != "0", forKey: "serviceShades")  // SHADES=0: one colour for every service
 d.synchronize()

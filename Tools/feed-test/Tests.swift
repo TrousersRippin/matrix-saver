@@ -363,6 +363,40 @@ extension LogFeed {
             let distinct = Set(rgb.map { $0.map { Int(($0 * 20).rounded()) } }).count
             check(distinct == rgb.count, "colour \(index): shades differ", "\(rgb)")
         }
+        // No shade may look like the error or warning ink: none in the red or amber hues unless
+        // the rain is there too (then those inks are white). Every palette colour, and Custom
+        // and Colour Cycle all round the wheel.
+        var clashes: [String] = [], alike: [String] = []
+        func look(_ name: String, cycle: Double = 0) {
+            let shades = s.shadeColors(cycleHue: cycle)
+            let rgb = shades.map { NSColor(cgColor: $0)!.usingColorSpace(.genericRGB)! }
+            let rain = s.rainNear(cycleHue: (cycle * 48).rounded() / 48)
+            for c in rgb where c.saturationComponent > 0.35 {
+                let h = Double(c.hueComponent)
+                // Clearly inside a band: colour conversion moves a hue on the edge by ~0.001.
+                let inside = { (band: (Double) -> Bool) in
+                    [h - 0.002, h, h + 0.002].allSatisfy { band(($0 + 1).truncatingRemainder(dividingBy: 1)) } }
+                if (inside(Settings.isRed) && !rain.red) || (inside(Settings.isAmber) && !rain.amber) {
+                    clashes.append("\(name): \(String(format: "%.3f", h))")
+                }
+            }
+            let keys = rgb.map { [$0.redComponent, $0.greenComponent, $0.blueComponent].map { Int(($0 * 20).rounded()) } }
+            if Set(keys).count != keys.count { alike.append(name) }
+        }
+        for index in 0..<Settings.customColorIndex {
+            s.colorIndex = index
+            look(Settings.palette[index].name)
+        }
+        for step in 0..<200 {
+            let hue = Double(step) / 200
+            s.colorIndex = Settings.customColorIndex; s.customHue = hue
+            look("custom \(hue)")
+            s.colorIndex = Settings.cycleColorIndex
+            look("cycle \(hue)", cycle: hue)
+        }
+        expectEqual(clashes, [], "no shade in the error or warning colours")
+        expectEqual(alike, [], "shades differ at every hue")
+
         s.colorIndex = Settings.cycleColorIndex
         expectEqual(s.shadeColors(cycleHue: 0.370), s.shadeColors(cycleHue: 0.372),
                     "colour cycle: shades move in steps")

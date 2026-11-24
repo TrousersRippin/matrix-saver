@@ -37,7 +37,7 @@ when Troy asks.
 ./make-dmg.sh          # build + dist/Matrix-<CFBundleShortVersionString>.dmg + dist/matrix.zip
 ./make-dmg.sh --zip    # also dist/Matrix-<version>.zip (folder with saver + Instructions.txt)
 Tools/render-test.sh   # render test, see below
-Tools/feed-test.sh     # log feed tests (154 checks, ~1 min with compile); FILTER=<group> for some
+Tools/feed-test.sh     # log feed tests (156 checks, ~1 min with compile); FILTER=<group> for some
 ```
 
 ## How it works
@@ -139,10 +139,16 @@ Tools/feed-test.sh     # log feed tests (154 checks, ~1 min with compile); FILTE
   - **Service shades** (`Settings.serviceShades`, Logs tab "Shade the rain by service", default
     on, Loki only: `Settings.shadesShown`): each source has a `shade` 0-5 from an FNV-1a hash of
     its name (`LogFeed.shade(of:)`, stable across restarts and displays; a file's "" is 0).
-    `nextLine` returns it, `Drop.shade` carries it, and a plain cell gets ink
+    **Front layer only** (`Layer.shades`): inks are drawn after the tint, over every layer, so
+    with Depth a back layer's shades covered the front layer, clock and banner (fixed in 2.15;
+    back layers get no shade glyphs). `nextLine` returns it, `Drop.shade` carries it, and a plain cell gets ink
     `Layer.Ink.firstShade + shade - 1` (shade 0 stays plain and tinted). `Settings.shadeColors`
     gives shades 1-5: rain hue ±0.05, ±0.1 (saturation 0.9×), and paler (0.4× saturation);
-    white rain gets pale tints. They are appended to `inkColors`, rendered by
+    white rain gets pale tints (hues 0.3-0.9). A shade whose hue lands in the red (<0.06, >0.94)
+    or amber (0.06-0.18) band, while the rain isn't there (`rainNear`, the same rule as
+    `inkColors`), becomes the rain hue darker instead, so no shade passes for an error or warning
+    (2.14 had Red rain's +0.1 shade amber). Hues are calibrated (generic RGB); Custom and Cycle use
+    their exact hue. Ripples with level colours off leave shades alone. They are appended to `inkColors`, rendered by
     `renderInkGlyphs` with the trail's softer glow and drawn in `drawInk` at the trail's b²
     alpha, so shade 0 and the tinted rain look the same. Levels, keywords, ripples and banners
     override the shade. Under Colour Cycle the shade hue moves in 1/48 steps (2.5 s) and
@@ -191,7 +197,7 @@ protection). To change the installed saver's settings, ask Troy to use Options.
   rules. Checked by breaking three behaviours in a copy: each was caught, exit status 1.
 - `Tools/render-test.sh` compiles `MatrixView.swift` with a small driver and renders frames.
   Settings come from environment variables: `SOURCE` (file or Loki URL), `QUERY`, `DURATION`,
-  `COLOR` (4 = Red, 8 = Cycle), `SHADES=0` (service shades off), `OUT`, `SHEET` + `TAB` (Options tab to PNG), `MENU=1` (drive the Services
+  `COLOR` (4 = Red, 8 = Cycle), `SHADES=0` (service shades off), `DEPTH=1` (three layers; off by default), `OUT`, `SHEET` + `TAB` (Options tab to PNG), `MENU=1` (drive the Services
   menu). Look at the PNGs. It is **not sandboxed**, so it can't prove sandbox behaviour. It deletes
   its ByHost prefs afterwards. Output goes in `build/`, which `build.sh` wipes.
 - **In the real host:** after `./build.sh --install`, open
@@ -328,6 +334,13 @@ after are 2.x. Old numbers are in brackets, as older notes, DMGs and GitHub may 
   "shades"); renders against the home Loki with all services in green, blue, white and Colour
   Cycle (2560×1440, Depth) and the Logs tab. The orange columns seen in the green render were
   real WRN lines (gotify, netbootxyz). Options pages grew to 14 rows. Installed on Troy's Mac.
+- **2.15** (2026-11-24): fixes from a code review of 2.14. (1) With Depth, back layers' shaded
+  text drew over the front layer, clock and banner: shades are now front layer only. (2) On Red
+  or Amber rain a shade looked like the warning or error ink: shades avoid those bands (a feed
+  test sweeps the palette and Custom/Cycle hues; with the fix disabled it fails on Red and
+  Amber). (3) A ripple with level colours off removed shades. (4) The Logs tab note (1.5 rows
+  tall from row 12/13) overflowed the page, which macOS 13 clips; now one row. Feed tests 156
+  pass; renders with Depth in red and green, and the Logs tab.
 
 Ideas not done (suggested 2026-11-15; Troy's picks, fold repeats, quiet-service alert,
 the test script and service shades, are all done):
